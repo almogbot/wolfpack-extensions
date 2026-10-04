@@ -1,7 +1,5 @@
 # Wolfpack Changes extension
 
-> **Publication status: prepared but not published.** The npm command below is the intended post-approval consumer command, not a claim that `0.1.0` is available today.
-
 A read-only Git status context view for Wolfpack. It shows the selected **local** session's launch project branch plus staged, unstaged, and untracked paths. It is not a diff editor: it has no stage, commit, discard, file-write, arbitrary path, command, shell, token, or terminal API.
 
 ## Install and manage
