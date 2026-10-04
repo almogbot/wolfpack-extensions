@@ -1,0 +1,34 @@
+{
+  "name": "wolfpack-extension-changes",
+  "version": "0.1.0",
+  "description": "Read-only Git status context view for Wolfpack.",
+  "license": "MIT",
+  "files": ["dist", "README.md", "LICENSE"],
+  "wolfpack": {
+    "manifestVersion": 1,
+    "apiVersion": 1,
+    "id": "changes",
+    "ui": "dist/ui.js",
+    "skills": [],
+    "documents": []
+  },
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "check:package": "bun run scripts/check-package.ts",
+    "check:package-negative": "bun run scripts/check-package-negative.ts",
+    "verify:host-install": "bun run scripts/verify-host-install.ts",
+    "verify:portable": "bun run scripts/verify-portable.ts",
+    "verify:host-types": "bun run scripts/verify-host-types.ts",
+    "pack": "bun run scripts/pack.ts"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.10.2",
+    "@playwright/test": "1.58.2",
+    "bun-types": "1.3.10",
+    "typescript": "6.0.3"
+  },
+  "engines": { "node": ">=22" },
+  "keywords": ["wolfpack", "wolfpack-extension", "git", "status"]
+}

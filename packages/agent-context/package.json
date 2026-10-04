@@ -1,0 +1,24 @@
+{
+  "name": "wolfpack-extension-agent-context",
+  "version": "0.1.0",
+  "description": "Agent-authored scoped context view for Wolfpack.",
+  "license": "MIT",
+  "files": ["dist", "schemas", "skills", "README.md", "LICENSE"],
+  "wolfpack": {
+    "manifestVersion": 1,
+    "apiVersion": 1,
+    "id": "agent-context",
+    "ui": "dist/ui.js",
+    "skills": ["skills/wolfpack-agent-context"],
+    "documents": [{ "id": "context", "schemaVersion": 1, "schema": "schemas/context.schema.json" }]
+  },
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json",
+    "test": "bun test test",
+    "check:package": "bun run scripts/check-package.ts",
+    "check:package-negative": "bun run scripts/check-package-negative.ts",
+    "pack": "bun run scripts/pack.ts"
+  },
+  "engines": { "node": ">=22" }
+}

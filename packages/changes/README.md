@@ -1,0 +1,60 @@
+# Wolfpack Changes extension
+
+> **Publication status: prepared but not published.** The npm command below is the intended post-approval consumer command, not a claim that `0.1.0` is available today.
+
+A read-only Git status context view for Wolfpack. It shows the selected **local** session's launch project branch plus staged, unstaged, and untracked paths. It is not a diff editor: it has no stage, commit, discard, file-write, arbitrary path, command, shell, token, or terminal API.
+
+## Install and manage
+
+The package contains its prebuilt browser bundle; installation neither clones Wolfpack nor runs a build, lifecycle script, or runtime dependency install.
+
+```sh
+wolfpack extensions install npm:wolfpack-extension-changes@0.1.0 --trust-browser-code
+wolfpack extensions update npm:wolfpack-extension-changes@0.1.0 --trust-browser-code
+wolfpack extensions disable changes
+wolfpack extensions enable changes
+wolfpack extensions remove changes
+```
+
+`--trust-browser-code` is required because this installs browser JavaScript into the authenticated Wolfpack UI. Review the exact package/version before granting it. The extension asks the host only for `project.gitStatus()` for the selected local session; the host binds that request to its installed extension and exact session UUID. It reads the session launch project, not a later terminal `cd`. Remote sessions are unavailable and never fall back to local data.
+
+Git execution is host-owned, fixed-argv and read-only. The host disables inherited Git overrides, global/system configuration, hooks, optional index writes, fsmonitor, filters, submodule traversal and rename detection, applies output/time bounds, and reports truncation/unavailability rather than claiming a clean tree. The widget polls serially every five seconds only while its view and browser page are visible; manual refresh and browser focus refresh are available.
+
+## Compatibility
+
+This package requires Wolfpack Extensions APIv1 with `context.project.gitStatus(signal?)`. The validated host source revision is `c0854195da6ca4788d532bbe77ea0600b3cf8a86`; it provides the needed API. The published `wolfpack-bridge@1.6.24` does **not** provide that API and cannot install/use this package. There is intentionally no compatibility shim for older hosts.
+
+## Develop independently
+
+Requirements: Bun and Node 22+ for package tooling. No Wolfpack checkout or unpublished `wolfpack-bridge` package is needed. From this monorepo, install the pinned development tools at the repository root.
+
+```sh
+bun install --frozen-lockfile
+bun run typecheck
+bun run build
+bun test
+bun run check:package
+bun run check:package-negative
+bun run pack
+```
+
+Set `WOLFPACK_WIDGET_BRAVE=/Applications/Brave\\ Browser.app/Contents/MacOS/Brave\\ Browser` to run the portable browser regressions with a chosen local Brave binary; otherwise Playwright's installed Chromium is used. Browser binaries are a development-test prerequisite, not a package dependency.
+
+`check:package` fresh-builds `src/ui.ts` into a temporary directory and byte-compares it with `dist/ui.js` before packing; it parses the shipped bundle to reject static imports, dynamic imports, and `require`. `check:package-negative` permanently exercises isolated stale-source and dormant-dynamic-import counterfactuals. Package-manager subprocesses use temporary HOME/cache/user-config paths with install scripts disabled; this is verification isolation, not a claim about a consumer's npm configuration.
+
+The source uses local structural APIv1 types only (`src/api.ts`). They are compile-time documentation, not a vendored framework or runtime dependency. `dist/ui.js` has no imports and is the exact browser asset declared by the manifest.
+
+## Optional host verification
+
+Normal development never needs a Wolfpack checkout. A release reviewer with an APIv1 host checkout can additionally run the isolated proof (it uses a temporary child `HOME`, an SRI loopback registry for the runtime fixture, and public CLI operations only on the exact unpacked archive):
+
+```sh
+WOLFPACK_EXTENSION_HOST_ROOT=/absolute/path/to/api-v1-wolfpack bun run verify:host-types
+WOLFPACK_EXTENSION_HOST_ROOT=/absolute/path/to/api-v1-wolfpack bun run verify:host-install
+```
+
+`verify:host-types` uses this package's pinned TypeScript 6.0.3 in strict/ignore-config mode to compare a locally authored context-view contribution directly with the host contribution parameter, plus context/status shapes. The runtime fixture's loopback registry only proves archive SRI acquisition. The public CLI intentionally uses its fixed production registry for `npm:` sources; the loopback registry is only trusted runtime-fixture injection. The same proof separately invokes the public CLI with the packed archive unpacked locally, so it does not claim a CLI local-registry install.
+
+## Provenance and release
+
+Extracted from Wolfpack revision `c0854195da6ca4788d532bbe77ea0600b3cf8a86` under the MIT license; see `LICENSE`. The extracted UI behavior and tests originated in the Wolfpack Changes extension sample. A release maintainer must review the packed artifact, run the checks above and the isolated host-install verification, confirm the target host API, and manually publish only after approval. This repository has no auto-publish workflow and assumes no npm credentials.

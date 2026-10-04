@@ -1,0 +1,17 @@
+{
+  "name": "wolfpack-extension-notes",
+  "version": "0.1.0",
+  "description": "Scoped local notes context view for Wolfpack.",
+  "license": "MIT",
+  "files": ["dist", "README.md", "LICENSE"],
+  "wolfpack": { "manifestVersion": 1, "apiVersion": 1, "id": "notes", "ui": "dist/ui.js", "skills": [], "documents": [] },
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json",
+    "test": "bun test test",
+    "check:package": "bun run scripts/check-package.ts",
+    "check:package-negative": "bun run scripts/check-package-negative.ts",
+    "pack": "bun run scripts/pack.ts"
+  },
+  "engines": { "node": ">=22" }
+}

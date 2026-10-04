@@ -1,0 +1,29 @@
+{
+  "name": "wolfpack-extensions",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "bun run --filter '*' build",
+    "typecheck": "bun run --filter '*' typecheck && ./node_modules/.bin/tsc --noEmit -p tsconfig.tools.json",
+    "test": "bun test",
+    "check:package": "bun run --filter '*' check:package",
+    "check:package-negative": "bun run --filter '*' check:package-negative",
+    "pack": "bun run --filter '*' pack",
+    "verify:portable": "bun run typecheck && bun run scripts/verify-portable.ts",
+    "verify:host-compat": "bun run scripts/verify-host-compat.ts",
+    "verify:host-install": "bun run scripts/verify-host-install.ts",
+    "verify:host-install-causal": "bun run scripts/verify-host-install-causal.ts",
+    "verify:host-agent-context-schema": "bun run scripts/verify-host-agent-context-schema.ts",
+    "verify:host-agent-context-ui": "bun test packages/agent-context/test/component.test.ts",
+    "verify:host-agent-context-ui-counterfactual": "bun run scripts/verify-host-agent-context-ui-counterfactual.ts"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.10.2",
+    "@playwright/test": "1.58.2",
+    "bun-types": "1.3.10",
+    "typescript": "6.0.3"
+  },
+  "engines": { "node": ">=22" }
+}

@@ -1,0 +1,24 @@
+import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { acceptsRevision, contextViewModel, splitBulletText } from "../src/model.ts";
+const root = join(import.meta.dirname, "..");
+const schema = readFileSync(join(root, "schemas/context.schema.json"));
+const legacy = { schemaVersion: 1, goal: "Existing goal", planItems: [{ id: "plan", text: "Existing plan", status: "pending" as const }], decisions: ["Existing decision"], blockers: [], nextSteps: ["Existing next step"] };
+const rich = { ...legacy, planItems: [{ ...legacy.planItems[0], text: "Existing plan\n\nSupporting explanation" }], decisions: ["A concise headline\n\nFull rationale"], blockers: ["Input needed\n\nWaiting for the named prerequisite"], nextSteps: ["Review\n\nInspect the expanded content"] };
+test("Agent Context preserves scoped revision, hostile text and stable headline/details model contracts", () => {
+  expect(createHash("sha256").update(schema).digest("hex")).toBe("1e1e51e94c628b104fd927995995ed484385c3ebc87741787a8cd67694c485e3");
+  expect(acceptsRevision(4, 3)).toBe(false); expect(acceptsRevision(4, 4)).toBe(true); expect(acceptsRevision(4, 5)).toBe(true);
+  expect(contextViewModel(null)).toMatchObject({ state: "empty", revision: 0 });
+  expect(contextViewModel({ ...legacy, goal: "<img src=x onerror=alert(1)>" }, 3)).toMatchObject({ state: "ready", revision: 3, goal: "<img src=x onerror=alert(1)>" });
+  expect(contextViewModel({ bad: true }, 4)).toMatchObject({ state: "error", revision: 4 });
+  expect(contextViewModel(rich, 2)).toMatchObject({ state: "ready", revision: 2, decisions: [{ id: "A concise headline", text: "A concise headline", details: "Full rationale" }] });
+  expect(contextViewModel({ ...rich, state: "empty", revision: 999 }, 2)).toMatchObject({ state: "ready", revision: 2 });
+  expect(contextViewModel({ ...rich, decisions: [{ id: "choice", text: "Headline", details: 42 }] }, 3)).toMatchObject({ state: "error" });
+  expect(contextViewModel({ ...rich, planItems: [{ ...rich.planItems[0], text: [] }] }, 3)).toMatchObject({ state: "error" });
+  expect(splitBulletText("Headline\n\nDetails\n\nFurther paragraph")).toEqual({ text: "Headline", details: "Details\n\nFurther paragraph" });
+  expect(splitBulletText("Headline\r\n\r\nDetails")).toEqual({ text: "Headline", details: "Details" });
+  for (const value of ["Unchanged plain text", "A single\nline break", "\n\nNo headline", "No details\n\n"]) expect(splitBulletText(value)).toEqual({ text: value });
+});
+export const schemaContractFixtures = { legacy, rich };

@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/changes" },
+    { "path": "./packages/agent-context" },
+    { "path": "./packages/notes" }
+  ]
+}
