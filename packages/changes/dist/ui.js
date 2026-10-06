@@ -50,6 +50,53 @@ function fileRow(change) {
   row.append(path, kind);
   return row;
 }
+function renderPaths(list, changes, directories, collapsed) {
+  const available = new Set;
+  const children = new Map;
+  const append = (parent, child) => {
+    const rows = children.get(parent) ?? [];
+    rows.push(child);
+    children.set(parent, rows);
+  };
+  children.set(list, []);
+  for (const change of changes) {
+    const segments = (change.path.endsWith("/") ? change.path.slice(0, -1) : change.path).split("/");
+    let parent = list;
+    for (let index = 1;index < segments.length; index++) {
+      const path = segments.slice(0, index).join("/");
+      let disclosure = directories.get(path);
+      if (!disclosure) {
+        const section = element("details"), heading = element("summary"), nested = element("ul");
+        section.dataset.directory = path;
+        section.open = !collapsed.has(path);
+        heading.append(element("span", "directory-label", `${path}/`));
+        section.append(heading, nested);
+        section.addEventListener("toggle", () => {
+          if (section.open)
+            collapsed.delete(path);
+          else
+            collapsed.add(path);
+        });
+        disclosure = { section, heading, list: nested };
+        directories.set(path, disclosure);
+      }
+      if (!available.has(path)) {
+        available.add(path);
+        children.set(disclosure.list, []);
+        const row = element("li", "directory-row");
+        row.append(disclosure.section);
+        append(parent, row);
+      }
+      parent = disclosure.list;
+    }
+    append(parent, fileRow(change));
+  }
+  for (const [parent, rows] of children)
+    parent.replaceChildren(...rows);
+  for (const path of directories.keys())
+    if (!available.has(path))
+      directories.delete(path);
+}
 function register(host) {
   host.registerContextView({
     id: "changes",
@@ -86,6 +133,11 @@ function register(host) {
 .wolfpack-changes ul{list-style:none;margin:3px 0 0;padding:0}
 .wolfpack-changes li{display:flex;gap:10px;align-items:center;min-height:32px;padding:5px 7px;border-radius:4px}
 .wolfpack-changes li:hover{background:var(--bg-hover,#1b231e)}
+.wolfpack-changes li.directory-row{display:block;padding:0 0 0 8px;min-width:0}
+.wolfpack-changes li.directory-row:hover{background:none}
+.wolfpack-changes .directory-row details{margin:3px 0 0}
+.wolfpack-changes summary::before{flex:none}
+.wolfpack-changes .directory-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;unicode-bidi:plaintext;font-family:monospace}
 .wolfpack-changes .path{min-width:0;flex:1;font:12px/1.5 monospace;unicode-bidi:plaintext}
 .wolfpack-changes .file-name,.wolfpack-changes .directory,.wolfpack-changes .previous-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wolfpack-changes .directory,.wolfpack-changes .previous-path{font-size:10px;color:var(--text-muted,#a4b2a9)}
@@ -137,7 +189,7 @@ function register(host) {
         heading.append(element("span", "", title), badge);
         section.append(heading, list);
         files.append(section);
-        return { key, section, badge, list, fingerprint: "" };
+        return { key, section, heading, badge, list, fingerprint: "", directories: new Map, collapsed: new Set };
       });
       const footer = element("footer"), automatic = element("span", "auto-refresh", "Auto-refresh · 5s"), updated = element("time", "updated", "Not checked yet");
       automatic.title = "Updates every five seconds while visible, and when you return to this window.";
@@ -158,7 +210,34 @@ function register(host) {
             continue;
           group.fingerprint = fingerprint;
           text(group.badge, String(changes.length));
-          group.list.replaceChildren(...changes.map(fileRow));
+          const focused = document.activeElement;
+          const focusedPath = [...group.directories].find(([, directory]) => directory.heading === focused)?.[0];
+          for (const [path, directory] of group.directories) {
+            if (directory.section.open)
+              group.collapsed.delete(path);
+            else
+              group.collapsed.add(path);
+          }
+          renderPaths(group.list, changes, group.directories, group.collapsed);
+          if (focusedPath !== undefined && changes.length) {
+            let path = focusedPath, fallback = group.heading;
+            while (path) {
+              const directory = group.directories.get(path);
+              if (directory) {
+                fallback = directory.heading;
+                break;
+              }
+              const split = path.lastIndexOf("/");
+              path = split < 0 ? "" : path.slice(0, split);
+            }
+            let ancestor = fallback.parentElement?.parentElement?.closest("details");
+            while (ancestor && ancestor !== group.section) {
+              if (!ancestor.open)
+                fallback = ancestor.querySelector("summary");
+              ancestor = ancestor.parentElement?.closest("details") ?? null;
+            }
+            fallback.focus({ preventScroll: true });
+          }
         }
         text(branch, status.state === "ready" ? status.detached ? "Detached HEAD" : status.branch ?? "Git" : "Git");
         branch.title = branch.textContent;

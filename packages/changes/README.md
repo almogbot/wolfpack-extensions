@@ -16,6 +16,8 @@ wolfpack extensions remove changes
 
 `--trust-browser-code` is required because this installs browser JavaScript into the authenticated Wolfpack UI. Review the exact package/version before granting it. The extension asks the host only for `project.gitStatus()` for the selected local session; the host binds that request to its installed extension and exact session UUID. It reads the session launch project, not a later terminal `cd`. Remote sessions are unavailable and never fall back to local data.
 
+Paths are grouped under staged, unstaged, and untracked, with nested directory disclosures expanded by default. Click a directory or use Space/Enter on its heading to hide all its descendants in that group (for example, `tests/`); other groups are unaffected. Collapse state and available focused headings survive polling refreshes while the view is mounted. If a focused directory disappears, focus returns to its nearest remaining parent heading, its group, or Refresh when the group is empty. Summarized untracked directories remain leaf entries, not browsable folders.
+
 Git execution is host-owned, fixed-argv and read-only. The host disables inherited Git overrides, global/system configuration, hooks, optional index writes, fsmonitor, filters, submodule traversal and rename detection, applies output/time bounds, and reports truncation/unavailability rather than claiming a clean tree. The widget polls serially every five seconds only while its view and browser page are visible; manual refresh and browser focus refresh are available.
 
 ## Compatibility
