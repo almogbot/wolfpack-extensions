@@ -135,7 +135,7 @@ test("Changes uses unique counts, literal filename hierarchy and stable keyboard
     expect(await page.locator('.path[title="src/widgets/changes.ts"]').count()).toBe(2);
     expect(await page.locator('.previous-path').textContent()).toBe("from src/old.ts");
     expect(await page.locator(".wolfpack-changes img").count()).toBe(0);
-    const summary = page.locator('[data-group="staged"] summary');
+    const summary = page.locator('[data-group="staged"] > summary');
     await summary.focus(); await summary.press("Space");
     expect(await page.locator('[data-group="staged"]').evaluate((node: HTMLDetailsElement) => node.open)).toBe(false);
     await summary.evaluate(node => { (globalThis as any).__gitSummary = node; });
@@ -166,6 +166,79 @@ test("Changes uses unique counts, literal filename hierarchy and stable keyboard
   } finally { await fixture.close(); }
 }, 20_000);
 
+
+test("Changes nests native directory disclosures, isolates collapse and preserves changed-poll focus with removal fallback", async () => {
+  const fixture = await component();
+  try {
+    const { page } = fixture; await page.clock.install();
+    await page.evaluate(() => {
+      (globalThis as any).__git.value = { state: "ready", branch: "directories", detached: false, truncated: false,
+        staged: [{ path: "tests/unit/a.ts", status: "modified" }, { path: "tests/integration/b.ts", previousPath: "old/b.ts", status: "renamed" }, { path: "root.ts", status: "added" }],
+        unstaged: [{ path: "tests/unit/a.ts", status: "modified" }],
+        untracked: [{ path: "tests/generated/", status: "untracked" }, { path: "<img src=x>/literal.ts", status: "untracked" }],
+      };
+      (globalThis as any).__sample.controller.setVisible(true);
+    });
+    await page.waitForFunction(() => document.querySelector(".branch")?.textContent === "directories");
+    const staged = page.locator('[data-group="staged"]');
+    const directory = (path: string) => staged.locator(`details[data-directory="${path}"]`);
+    const tests = directory("tests"), unit = directory("tests/unit");
+    // Root and nested directory paths are native, expanded disclosures, not synthetic tree controls.
+    expect(await tests.count()).toBe(1);
+    expect(await unit.evaluate((node: HTMLDetailsElement) => node.open)).toBe(true);
+    expect(await tests.evaluate((node: HTMLDetailsElement) => node.open)).toBe(true);
+    expect(await page.locator(".change-count").textContent()).toBe("5 changed files");
+    expect(await staged.locator(":scope > summary .group-count").textContent()).toBe("3");
+    expect(await page.locator(".previous-path").textContent()).toBe("from old/b.ts");
+    expect(await page.locator('details[data-directory="tests/generated"]').count()).toBe(0);
+    expect(await page.locator('.path[title="tests/generated/"] .file-name').textContent()).toBe("generated/");
+    expect(await page.locator(".wolfpack-changes img").count()).toBe(0);
+    expect(await page.locator('[data-group="untracked"] .directory-label').filter({ hasText: "<img src=x>/" }).textContent()).toBe("<img src=x>/");
+    expect(await unit.locator(":scope > summary").textContent()).toBe("tests/unit/");
+    for (const width of [320, 900]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.locator(".wolfpack-changes").evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      const box = await tests.locator(":scope > summary").boundingBox();
+      expect(box!.height).toBeGreaterThanOrEqual(width === 320 ? 44 : 32);
+      const accessibility = await new AxeBuilder({ page }).include(".wolfpack-changes").withTags(["wcag2a", "wcag2aa"]).analyze();
+      expect(accessibility.violations.filter(v => ["serious", "critical"].includes(v.impact ?? ""))).toEqual([]);
+    }
+    const testsHeading = tests.locator(":scope > summary"), unitHeading = unit.locator(":scope > summary");
+    await testsHeading.focus(); await testsHeading.press("Space");
+    expect(await staged.locator('.path[title="tests/unit/a.ts"]').isVisible()).toBe(false);
+    expect(await staged.locator('.path[title="tests/integration/b.ts"]').isVisible()).toBe(false);
+    expect(await staged.locator('.path[title="root.ts"]').isVisible()).toBe(true);
+    expect(await page.locator('[data-group="unstaged"] .path').isVisible()).toBe(true);
+    await page.evaluate(() => { (globalThis as any).__git.value.staged.push({ path: "tests/unit/new.ts", status: "added" }); });
+    await page.clock.fastForward(5000);
+    await page.waitForFunction(() => document.querySelector('[data-group="staged"] > summary .group-count')?.textContent === "4");
+    expect(await tests.evaluate((node: HTMLDetailsElement) => node.open)).toBe(false);
+    expect(await testsHeading.evaluate(node => node === document.activeElement)).toBe(true);
+    await testsHeading.press("Enter");
+    await unitHeading.focus(); await unitHeading.press("Enter");
+    await unitHeading.evaluate(node => { (globalThis as any).__directoryHeading = node; });
+    await page.evaluate(() => { (globalThis as any).__git.value.staged.push({ path: "tests/unit/another.ts", status: "added" }); });
+    await page.clock.fastForward(5000);
+    await page.waitForFunction(() => document.querySelector('[data-group="staged"] > summary .group-count')?.textContent === "5");
+    expect(await unitHeading.evaluate(node => node === document.activeElement && node === (globalThis as any).__directoryHeading)).toBe(true);
+    expect(await unit.evaluate((node: HTMLDetailsElement) => node.open)).toBe(false);
+    await testsHeading.focus(); await testsHeading.press("Space"); await testsHeading.press("Space");
+    expect(await unit.evaluate((node: HTMLDetailsElement) => node.open)).toBe(false);
+    await unitHeading.focus();
+    await page.evaluate(() => { const git = (globalThis as any).__git; git.value.staged = git.value.staged.filter((file: any) => !file.path.startsWith("tests/unit/")); });
+    await page.clock.fastForward(5000);
+    await page.waitForFunction(() => document.querySelector('[data-group="staged"] > summary .group-count')?.textContent === "2");
+    expect(await testsHeading.evaluate(node => node === document.activeElement)).toBe(true);
+    await page.evaluate(() => { (globalThis as any).__git.value.staged = [{ path: "root.ts", status: "added" }]; });
+    await page.clock.fastForward(5000);
+    await page.waitForFunction(() => document.querySelector('[data-group="staged"] > summary .group-count')?.textContent === "1");
+    expect(await staged.locator(":scope > summary").evaluate(node => node === document.activeElement)).toBe(true);
+    await page.evaluate(() => { (globalThis as any).__git.value.staged = []; });
+    await page.clock.fastForward(5000);
+    await page.waitForFunction(() => (document.querySelector('[data-group="staged"]') as HTMLElement).hidden);
+    expect(await page.getByRole("button", { name: "Refresh Git status" }).evaluate(node => node === document.activeElement)).toBe(true);
+  } finally { await fixture.close(); }
+}, 20_000);
 
 test("Changes manifest and default registration declare only the context view", async () => {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
