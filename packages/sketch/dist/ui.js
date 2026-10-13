@@ -44,6 +44,10 @@ function parseBoard(value) {
         } else if (!integer(s[x], 160) || !integer(s[y], 160))
           throw Error("Invalid arrow endpoint");
       }
+    } else if (s.kind === "stroke") {
+      keys(s, ["id", "kind", "points", "label"]);
+      if (!Array.isArray(s.points) || s.points.length < 2 || s.points.length > 48 || s.points.some((p) => !Array.isArray(p) || p.length !== 2 || !integer(p[0], 160) || !integer(p[1], 160)))
+        throw Error("Invalid stroke");
     } else if (["rect", "hazard", "start", "goal", "text"].includes(s.kind)) {
       const box = s.kind === "rect" || s.kind === "hazard";
       keys(s, ["id", "kind", "x", "y", "label", ...box ? ["w", "h"] : []]);
@@ -79,12 +83,16 @@ function serializeBoard(board, base) {
     throw Error("Invalid revision");
   const quote = (s) => '"' + s.replaceAll("\\", "\\\\").replaceAll('"', "\\\"") + '"';
   return [`sketch v1 160x160 shapes=${board.shapes.length} base=${base};`, ...board.shapes.map((s) => {
-    const coordinates = s.kind === "arrow" ? `${s.from ?? `${s.x1},${s.y1}`}->${s.to ?? `${s.x2},${s.y2}`}` : `${s.x} ${s.y}${"w" in s ? ` ${s.w} ${s.h}` : ""}`;
+    const coordinates = s.kind === "stroke" ? s.points.map((p) => p.join(",")).join(" ") : s.kind === "arrow" ? `${s.from ?? `${s.x1},${s.y1}`}->${s.to ?? `${s.x2},${s.y2}`}` : `${s.x} ${s.y}${"w" in s ? ` ${s.w} ${s.h}` : ""}`;
     return `${s.kind} ${s.id} ${coordinates}${s.label !== undefined ? " " + quote(s.label) : ""};`;
   }), "end;"].join(`
 `);
 }
 function centre(s) {
+  if (s.kind === "stroke") {
+    const xs = s.points.map((p) => p[0]), ys = s.points.map((p) => p[1]);
+    return { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+  }
   return { x: s.x + ("w" in s ? s.w / 2 : 0), y: s.y + ("h" in s ? s.h / 2 : 0) };
 }
 function endpoint(b, s, end) {
@@ -123,6 +131,10 @@ function allocateId(b) {
     n++;
   return `s${n}`;
 }
+function segmentDistance(x, y, a, z) {
+  const dx = z[0] - a[0], dy = z[1] - a[1], t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy || 1)));
+  return Math.hypot(x - a[0] - t * dx, y - a[1] - t * dy);
+}
 function hitTest(b, x, y, tolerance = 4, nonArrow = false, textBounds) {
   return [...b.shapes].reverse().find((s) => {
     if (s.kind === "arrow") {
@@ -131,6 +143,8 @@ function hitTest(b, x, y, tolerance = 4, nonArrow = false, textBounds) {
       const a = endpoint(b, s, 1), z = endpoint(b, s, 2), dx = z.x - a.x, dy = z.y - a.y, t = Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / (dx * dx + dy * dy || 1)));
       return Math.hypot(x - a.x - t * dx, y - a.y - t * dy) <= tolerance;
     }
+    if (s.kind === "stroke")
+      return s.points.some((p, i) => segmentDistance(x, y, s.points[Math.max(0, i - 1)], p) <= tolerance);
     if (s.kind === "text" && textBounds) {
       const box = textBounds(s);
       return x >= s.x - tolerance && x <= s.x + box.width + tolerance && y >= s.y - box.ascent - tolerance && y <= s.y + box.descent + tolerance;
@@ -158,39 +172,90 @@ function moveShape(b, id, dx, dy) {
       }
       return r;
     }
+    if (s.kind === "stroke") {
+      const xs = s.points.map((p) => p[0]), ys = s.points.map((p) => p[1]), mx = Math.max(-Math.min(...xs), Math.min(160 - Math.max(...xs), dx)), my = Math.max(-Math.min(...ys), Math.min(160 - Math.max(...ys), dy));
+      return { ...s, points: s.points.map((p) => [p[0] + mx, p[1] + my]) };
+    }
     return { ...s, x: Math.max(0, Math.min("w" in s ? 160 - s.w : 159, s.x + dx)), y: Math.max(0, Math.min("h" in s ? 160 - s.h : 159, s.y + dy)) };
   }) };
+}
+function rdp(p, eps) {
+  const keep = new Uint8Array(p.length), stack = [[0, p.length - 1]];
+  keep[0] = keep[p.length - 1] = 1;
+  while (stack.length) {
+    const [lo, hi] = stack.pop();
+    let far = 0, at = -1;
+    for (let i = lo + 1;i < hi; i++) {
+      const d = segmentDistance(p[i].x, p[i].y, [p[lo].x, p[lo].y], [p[hi].x, p[hi].y]);
+      if (d > far) {
+        far = d;
+        at = i;
+      }
+    }
+    if (at >= 0 && far > eps) {
+      keep[at] = 1;
+      stack.push([lo, at], [at, hi]);
+    }
+  }
+  return p.filter((_, i) => keep[i]);
+}
+function simplifyStroke(path) {
+  if (path.length < 2 || path.reduce((n, p, i) => i ? n + Math.hypot(p.x - path[i - 1].x, p.y - path[i - 1].y) : 0, 0) < 3)
+    return;
+  let eps = 1.5, out = rdp(path, eps);
+  while (out.length > 48) {
+    eps *= 1.25;
+    out = rdp(path, eps);
+  }
+  const pts = out.map((p) => [Math.max(0, Math.min(160, Math.round(p.x))), Math.max(0, Math.min(160, Math.round(p.y)))]).filter((p, i, a) => !i || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]);
+  return pts.length >= 2 ? pts : undefined;
 }
 
 // src/ui.ts
 var font = "5px sans-serif";
+var STEP = 8;
+var TOOLS = [
+  ["Draw", "Draw", '<path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/>'],
+  ["Rect", "Box", '<rect x="4" y="6" width="16" height="12" rx="2"/>'],
+  ["Hazard", "Spikes", '<path d="M3 19L7 8l4 11 4-11 4 11"/>'],
+  ["Start", "Start", '<path d="M6 21V4"/><path d="M6 4h11l-3 4 3 4H6"/>'],
+  ["Goal", "Goal", '<path d="M12 3l2.6 6 6.4.5-4.8 4.2 1.5 6.3-5.7-3.3-5.7 3.3 1.5-6.3L3 9.5 9.4 9z"/>'],
+  ["Text", "Text", '<path d="M5 6h14M12 6v13M9 19h6"/>'],
+  ["Select", "Move", '<path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/>']
+];
 var empty = () => ({ schemaVersion: 1, size: 160, shapes: [] });
 function mount(container, context) {
-  let board = empty(), base = 0, tool = "Select", snapping = true, selected, disposed = false, visible = true, timer;
+  let board = empty(), base = 0, tool = "Draw", selected, disposed = false, visible = true, timer;
   let pending, ignored = 0, latest = 0;
   const undo = [], cleanups = new Set;
   let cursor = { x: 80, y: 80 }, preview;
   let gesture;
+  const th = (k, d) => context.theme[k] ?? d, ink = th("--text-primary", "#f2f4f7"), muted = th("--text-muted", "#a3abb5"), elevated = th("--bg-elevated", "#2a2f37"), line = th("--border", "#3a414b"), accent = th("--accent", "#5aa9ff"), onAccent = "#07101c", boxFill = th("--text-secondary", "#c9cfd7"), boxLine = th("--border-strong", "#8b94a0"), boxText = th("--bg-base", "#1b1e23");
   const root = document.createElement("section");
   root.setAttribute("aria-label", "Sketch");
-  root.style.cssText = `padding:8px;background:${context.theme["--bg-surface"] ?? "#202020"};color:${context.theme["--text-primary"] ?? "#ffffff"};font-family:${context.theme["--font-ui"] ?? "sans-serif"};box-sizing:border-box;max-width:576px`;
+  root.style.cssText = `padding:8px;background:${th("--bg-surface", "#1b1e23")};color:${ink};font-family:${th("--font-ui", "system-ui,sans-serif")};box-sizing:border-box;max-width:576px`;
   const toolbar = document.createElement("div");
   toolbar.setAttribute("aria-label", "Drawing tools");
-  toolbar.style.cssText = "display:flex;flex-wrap:wrap;gap:4px";
+  toolbar.style.cssText = "display:flex;flex-wrap:nowrap;gap:4px";
+  const actions = document.createElement("div");
+  actions.setAttribute("aria-label", "Actions");
+  actions.style.cssText = "display:flex;align-items:center;gap:6px;margin-top:6px";
   const counter = document.createElement("div");
   counter.setAttribute("role", "status");
+  counter.style.cssText = `margin-top:2px;font-size:11px;line-height:13px;text-align:right;white-space:nowrap;color:${muted}`;
   const status = document.createElement("div");
   status.setAttribute("role", "status");
+  status.style.cssText = "font-size:12px;min-height:16px;margin-top:4px";
   const banner = document.createElement("div"), note = document.createElement("div");
   note.style.whiteSpace = "pre-wrap";
   const surface = document.createElement("div");
-  surface.style.cssText = "position:relative;width:100%;max-width:560px";
+  surface.style.cssText = "position:relative;width:100%;max-width:560px;margin-top:4px";
   const canvas = document.createElement("canvas");
   canvas.setAttribute("role", "img");
   canvas.tabIndex = 0;
-  canvas.style.cssText = "display:block;width:100%;aspect-ratio:1;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;outline-offset:2px";
+  canvas.style.cssText = `display:block;width:100%;aspect-ratio:1;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;outline-offset:2px;border-radius:10px;box-shadow:0 0 0 1px ${line}`;
   surface.append(canvas);
-  root.append(toolbar, counter, status, banner, note, surface);
+  root.append(toolbar, actions, counter, status, banner, note, surface);
   container.append(root);
   function listen(target, name, fn) {
     target.addEventListener(name, fn);
@@ -201,35 +266,34 @@ function mount(container, context) {
     cleanups.add(off);
     return off;
   }
-  function button(name, parent, action) {
+  function button(name, parent, action, o = {}) {
     const b = document.createElement("button");
     b.type = "button";
-    b.textContent = name;
-    b.style.cssText = "min-width:44px;min-height:44px;padding:6px;font-size:12px;line-height:14px;touch-action:manipulation;white-space:nowrap;flex:0 0 auto";
+    b.setAttribute("aria-label", name);
+    const label = document.createElement("span");
+    label.textContent = name;
+    label.style.cssText = `font-size:${o.tool ? 11 : 12}px;line-height:13px;white-space:nowrap;${o.primary ? "font-weight:600" : ""}`;
+    if (o.icon)
+      b.insertAdjacentHTML("afterbegin", `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${o.icon}</svg>`);
+    b.append(label);
+    b.style.cssText = `display:flex;flex-direction:${o.tool ? "column" : "row"};align-items:center;justify-content:center;gap:2px;box-sizing:border-box;min-width:44px;min-height:${o.tool ? 48 : 44}px;padding:${o.tool ? "4px 2px" : "6px 12px"};border-radius:10px;border:1px solid ${o.primary ? accent : line};background:${o.primary ? accent : elevated};color:${o.primary ? onAccent : ink};font-family:inherit;touch-action:manipulation;cursor:pointer;flex:${o.tool ? "1 1 0" : "0 0 auto"}`;
     parent.append(b);
     listen(b, "click", action);
     return b;
   }
   const tools = new Map;
-  for (const name of ["Select", "Rect", "Arrow", "Text", "Start", "Goal", "Hazard"])
-    tools.set(name, button(name, toolbar, () => {
+  for (const [name, label, icon] of TOOLS)
+    tools.set(name, button(label, toolbar, () => {
       cancelGesture();
       cancelText();
-      resetArrow();
       tool = name;
+      if (name !== "Select")
+        selected = undefined;
       refresh();
-    }));
-  button("Delete", toolbar, () => {
-    if (selected) {
-      commit(deleteShape(board, selected));
-      selected = undefined;
-      refresh();
-    }
-  });
-  button("Undo", toolbar, () => {
+    }, { icon, tool: true }));
+  button("Undo", actions, () => {
     cancelGesture();
     cancelText();
-    resetArrow();
     const previous = undo.pop();
     if (previous) {
       board = previous.board;
@@ -238,50 +302,46 @@ function mount(container, context) {
       changed();
     }
   });
-  button("Clear", toolbar, () => {
+  const del = button("Delete", actions, () => {
+    if (selected) {
+      commit(deleteShape(board, selected));
+      selected = undefined;
+      refresh();
+    }
+  });
+  button("Clear", actions, () => {
     cancelGesture();
     cancelText();
-    resetArrow();
     commit(empty());
     selected = undefined;
     refresh();
   });
-  const snapButton = button("Snap on", toolbar, () => {
-    snapping = !snapping;
-    refresh();
-  });
-  const send = button("Send to agent", toolbar, () => {
+  const send = button("Send to agent", actions, () => {
+    const text = serializeBoard(board, base), toError = (e) => e instanceof Error ? e : Error(String(e));
+    const copy = (async () => navigator.clipboard.writeText(text))().then(() => {
+      return;
+    }, toError);
+    let composed = false, composeError;
     try {
-      context.terminal?.compose(serializeBoard(board, base));
-      status.textContent = "Sketch composed; send from the terminal";
-    } catch (e) {
-      error(e);
-    }
-  });
-  let fallback;
-  button("Copy", toolbar, () => {
-    const text = serializeBoard(board, base);
-    (async () => {
-      try {
-        await navigator.clipboard.writeText(text);
-        if (!disposed)
-          status.textContent = "Sketch copied";
-      } catch {
-        if (disposed)
-          return;
-        fallback?.remove();
-        fallback = document.createElement("textarea");
-        fallback.readOnly = true;
-        fallback.setAttribute("aria-label", "Copy sketch");
-        fallback.value = text;
-        fallback.style.cssText = "width:100%;box-sizing:border-box;font-size:16px";
-        root.append(fallback);
-        fallback.focus();
-        fallback.select();
-        status.textContent = "Select and copy the sketch";
+      if (context.terminal) {
+        context.terminal.compose(text);
+        composed = true;
       }
-    })();
-  });
+    } catch (e) {
+      composeError = toError(e);
+    }
+    copy.then((copyError) => {
+      if (disposed)
+        return;
+      if (!copyError)
+        status.textContent = composed ? "In the agent prompt and copied." : composeError ? `Compose failed (${composeError.message}); copied — paste into the agent prompt.` : "Copied — paste into the agent prompt.";
+      else if (composed)
+        status.textContent = `In the agent prompt (copy failed: ${copyError.message}).`;
+      else
+        error(composeError ?? copyError);
+    });
+  }, { primary: true });
+  send.style.marginLeft = "auto";
   function error(e) {
     status.textContent = e instanceof Error ? e.message : String(e);
   }
@@ -320,16 +380,20 @@ function mount(container, context) {
     }
   }
   function refresh() {
-    for (const [name, b] of tools)
+    for (const [name, b] of tools) {
       b.setAttribute("aria-pressed", String(name === tool));
-    snapButton.textContent = snapping ? "Snap on" : "Snap off";
-    snapButton.setAttribute("aria-pressed", String(snapping));
+      const on = name === tool;
+      b.style.background = on ? accent : elevated;
+      b.style.color = on ? onAccent : ink;
+      b.style.borderColor = on ? accent : line;
+    }
+    del.disabled = !board.shapes.some((s) => s.id === selected);
+    del.style.opacity = del.disabled ? ".45" : "1";
     const bytes = byteLength(serializeBoard(board, base));
     counter.textContent = `${bytes} / ${COMPOSE_LIMIT} B${bytes > COMPOSE_LIMIT ? " — remove shapes to send" : ""}`;
-    counter.style.color = bytes > COMPOSE_LIMIT ? context.theme["--danger"] ?? "#ffaaaa" : "";
-    send.disabled = bytes > COMPOSE_LIMIT || !context.terminal;
-    if (!context.terminal)
-      status.textContent = "Open the terminal to send";
+    counter.style.color = bytes > COMPOSE_LIMIT ? th("--danger", "#ff8a8a") : muted;
+    send.disabled = bytes > COMPOSE_LIMIT;
+    send.style.opacity = send.disabled ? ".45" : "1";
     note.textContent = board.note ?? "";
     const counts = new Map;
     for (const s of board.shapes)
@@ -345,27 +409,29 @@ function mount(container, context) {
       return;
     const scale = canvas.width / 160;
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
-    ctx.fillStyle = context.theme["--bg-inset"] ?? "#111111";
+    ctx.fillStyle = th("--bg-inset", "#12151a");
     ctx.fillRect(0, 0, 160, 160);
-    ctx.lineWidth = 0.4;
-    if (snapping) {
-      ctx.strokeStyle = context.theme["--border"] ?? "#555555";
-      ctx.beginPath();
-      for (let n = 8;n < 160; n += 8) {
-        ctx.moveTo(n, 0);
-        ctx.lineTo(n, 160);
-        ctx.moveTo(0, n);
-        ctx.lineTo(160, n);
-      }
-      ctx.stroke();
+    ctx.strokeStyle = "rgba(128,138,150,0.18)";
+    ctx.lineWidth = 0.3;
+    ctx.beginPath();
+    for (let n = STEP;n < 160; n += STEP) {
+      ctx.moveTo(n, 0);
+      ctx.lineTo(n, 160);
+      ctx.moveTo(0, n);
+      ctx.lineTo(160, n);
     }
-    const b = preview ?? board;
+    ctx.stroke();
+    const b = preview ?? board, YELLOW = "#ffe14d";
+    ctx.font = font;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
     for (const s of b.shapes) {
-      ctx.strokeStyle = s.id === selected ? "#ffff66" : context.theme["--accent"] ?? "#8bcfff";
-      ctx.fillStyle = s.kind === "hazard" ? "#ffaaaa" : context.theme["--text-primary"] ?? "#ffffff";
-      ctx.lineWidth = s.id === selected ? 1.4 : 0.8;
-      ctx.font = font;
+      const sel = s.id === selected;
+      ctx.lineWidth = 0.8;
+      ctx.fillStyle = ink;
       if (s.kind === "arrow") {
+        ctx.strokeStyle = sel ? YELLOW : accent;
+        ctx.lineWidth = sel ? 1.4 : 0.8;
         const a = endpoint(b, s, 1), z = endpoint(b, s, 2), angle = Math.atan2(z.y - a.y, z.x - a.x);
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
@@ -376,29 +442,104 @@ function mount(container, context) {
         ctx.stroke();
         if (s.label)
           ctx.fillText(s.label, (a.x + z.x) / 2, (a.y + z.y) / 2);
-      } else if ("w" in s) {
-        ctx.strokeRect(s.x, s.y, s.w, s.h);
-        if (s.kind === "hazard") {
-          ctx.fillStyle = "#ffaaaa55";
-          ctx.fillRect(s.x, s.y, s.w, s.h);
-        }
-        if (s.label)
-          ctx.fillText(s.label, s.x + 1, s.y + 5);
-        if (s.id === selected) {
-          ctx.fillStyle = "#ffff66";
-          ctx.fillRect(s.x + s.w - 2, s.y + s.h - 2, 4, 4);
-        }
-      } else if (s.kind === "text")
-        ctx.fillText(s.label, s.x, s.y);
-      else {
+      } else if (s.kind === "stroke") {
         ctx.beginPath();
-        ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
+        s.points.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+        if (sel) {
+          ctx.strokeStyle = YELLOW;
+          ctx.lineWidth = 4;
+          ctx.globalAlpha = 0.5;
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+        ctx.strokeStyle = ink;
+        ctx.lineWidth = 2;
         ctx.stroke();
-        ctx.fillText(s.kind === "start" ? "S" : "G", s.x + 4, s.y);
+        if (s.label)
+          ctx.fillText(s.label, s.points[0][0] + 1, s.points[0][1] - 2);
+      } else if (s.kind === "rect") {
+        ctx.fillStyle = boxFill;
+        ctx.fillRect(s.x, s.y, s.w, s.h);
+        ctx.strokeStyle = sel ? YELLOW : boxLine;
+        ctx.lineWidth = sel ? 1.4 : 0.8;
+        ctx.strokeRect(s.x, s.y, s.w, s.h);
+        if (s.label) {
+          ctx.fillStyle = boxText;
+          ctx.fillText(s.label, s.x + 1, s.y + 5);
+        }
+      } else if (s.kind === "hazard") {
+        ctx.fillStyle = "rgba(255,90,54,0.18)";
+        ctx.fillRect(s.x, s.y, s.w, s.h);
+        const n = Math.max(1, Math.round(s.w / 6)), tw = s.w / n, tooth = Math.min(s.h, tw * 1.3);
+        ctx.fillStyle = "#ff5a36";
+        ctx.beginPath();
+        for (let k = 0;k < n; k++) {
+          ctx.moveTo(s.x + k * tw, s.y + s.h);
+          ctx.lineTo(s.x + (k + 0.5) * tw, s.y + s.h - tooth);
+          ctx.lineTo(s.x + (k + 1) * tw, s.y + s.h);
+        }
+        ctx.fill();
+        if (sel) {
+          ctx.strokeStyle = YELLOW;
+          ctx.lineWidth = 1.4;
+          ctx.strokeRect(s.x, s.y, s.w, s.h);
+        }
+        if (s.label) {
+          ctx.fillStyle = ink;
+          ctx.fillText(s.label, s.x + 1, s.y + 5);
+        }
+      } else if (s.kind === "text") {
+        ctx.fillStyle = sel ? YELLOW : ink;
+        ctx.fillText(s.label, s.x, s.y);
+      } else if (s.kind === "start") {
+        ctx.fillStyle = "#34c759";
+        ctx.strokeStyle = "#34c759";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y);
+        ctx.lineTo(s.x, s.y - 10);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y - 10);
+        ctx.lineTo(s.x + 7, s.y - 7);
+        ctx.lineTo(s.x, s.y - 4);
+        ctx.fill();
+        if (s.label) {
+          ctx.fillStyle = ink;
+          ctx.fillText(s.label, s.x + 3, s.y + 5);
+        }
+      } else {
+        ctx.fillStyle = "#ffd23f";
+        ctx.strokeStyle = "#b8860b";
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        for (let k = 0;k < 10; k++) {
+          const r = k % 2 ? 2.2 : 5.5, a = -Math.PI / 2 + k * Math.PI / 5;
+          ctx.lineTo(s.x + r * Math.cos(a), s.y + r * Math.sin(a));
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        if (s.label) {
+          ctx.fillStyle = ink;
+          ctx.fillText(s.label, s.x + 6, s.y + 2);
+        }
+      }
+      if (sel && (s.kind === "start" || s.kind === "goal")) {
+        ctx.strokeStyle = YELLOW;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(s.x, s.kind === "start" ? s.y - 5 : s.y, 8, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (sel && s.kind === "rect") {
+        ctx.fillStyle = YELLOW;
+        ctx.fillRect(s.x + s.w - 2, s.y + s.h - 2, 4, 4);
       }
     }
     if (document.activeElement === canvas) {
       ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 0.8;
       ctx.beginPath();
       ctx.moveTo(cursor.x - 3, cursor.y);
       ctx.lineTo(cursor.x + 3, cursor.y);
@@ -416,8 +557,8 @@ function mount(container, context) {
   });
   resize.observe(surface);
   const cssUnits = (pixels) => pixels * 160 / (canvas.getBoundingClientRect().width || 160);
-  function hit(b, x, y, nonArrow = false) {
-    return hitTest(b, x, y, cssUnits(22), nonArrow, (s) => {
+  function hit(b, x, y) {
+    return hitTest(b, x, y, cssUnits(22), false, (s) => {
       const ctx = canvas.getContext("2d");
       ctx.font = font;
       const m = ctx.measureText(s.label);
@@ -428,8 +569,13 @@ function mount(container, context) {
     const r = canvas.getBoundingClientRect();
     return { x: Math.max(0, Math.min(160, (event.clientX - r.left) * 160 / r.width)), y: Math.max(0, Math.min(160, (event.clientY - r.top) * 160 / r.height)) };
   }
-  const quantize = (v, max = 160) => Math.max(0, Math.min(max, Math.round(snapping ? snap(v, 8) : v)));
+  const quantize = (v, max = 160) => Math.max(0, Math.min(max, Math.round(snap(v, STEP))));
+  let frame = 0;
   function cancelGesture() {
+    if (frame) {
+      cancelAnimationFrame(frame);
+      frame = 0;
+    }
     if (gesture && canvas.hasPointerCapture(gesture.id))
       canvas.releasePointerCapture(gesture.id);
     gesture = undefined;
@@ -450,9 +596,10 @@ function mount(container, context) {
       if (w && h)
         shape = { id, kind: g.tool === "Rect" ? "rect" : "hazard", x: Math.min(a.x, z.x), y: Math.min(a.y, z.y), w, h };
     }
-    if (g.tool === "Arrow") {
-      const from = hit(g.original, g.start.x, g.start.y, true), to = hit(g.original, g.current.x, g.current.y, true);
-      shape = { id, kind: "arrow", ...from ? { from: from.id } : { x1: a.x, y1: a.y }, ...to ? { to: to.id } : { x2: z.x, y2: z.y } };
+    if (g.tool === "Draw") {
+      const points = g.path && simplifyStroke(g.path);
+      if (points)
+        shape = { id, kind: "stroke", points };
     }
     return shape ? { ...g.original, shapes: [...g.original.shapes, shape] } : g.original;
   }
@@ -467,7 +614,7 @@ function mount(container, context) {
     const p = position(e), s = board.shapes.find((s) => s.id === selected), radius = cssUnits(12), handle = s && "w" in s && Math.abs(p.x - s.x - s.w) <= radius && Math.abs(p.y - s.y - s.h) <= radius;
     if (tool === "Select" && !handle)
       selected = hit(board, p.x, p.y)?.id;
-    gesture = { id: e.pointerId, start: p, current: p, original: board, selection: selected, resize: !!handle, tool };
+    gesture = { id: e.pointerId, start: p, current: p, original: board, selection: selected, resize: !!handle, tool, ...tool === "Draw" ? { path: [p] } : {} };
     canvas.setPointerCapture(e.pointerId);
     draw();
   });
@@ -476,7 +623,22 @@ function mount(container, context) {
     if (!gesture || gesture.id !== e.pointerId)
       return;
     gesture.current = position(e);
-    if (Math.hypot(gesture.current.x - gesture.start.x, gesture.current.y - gesture.start.y) >= (snapping ? 8 : 1))
+    if (gesture.path) {
+      const last = gesture.path[gesture.path.length - 1];
+      if (Math.hypot(gesture.current.x - last.x, gesture.current.y - last.y) >= 0.5 && gesture.path.length < 2000) {
+        gesture.path.push(gesture.current);
+        if (!frame)
+          frame = requestAnimationFrame(() => {
+            frame = 0;
+            if (gesture) {
+              preview = gestureBoard(gesture);
+              draw();
+            }
+          });
+      }
+      return;
+    }
+    if (Math.hypot(gesture.current.x - gesture.start.x, gesture.current.y - gesture.start.y) >= STEP)
       preview = gestureBoard(gesture);
     draw();
   });
@@ -487,8 +649,11 @@ function mount(container, context) {
     const g = gesture;
     g.current = position(e);
     const distance = Math.hypot(g.current.x - g.start.x, g.current.y - g.start.y);
+    g.path?.push(g.current);
     cancelGesture();
-    if (distance >= (snapping ? 8 : 1))
+    if (g.path)
+      commit(gestureBoard(g));
+    else if (distance >= STEP)
       commit(gestureBoard(g));
     else if (["Start", "Goal", "Text"].includes(g.tool))
       apply(g.start);
@@ -538,13 +703,6 @@ function mount(container, context) {
     }));
     input.focus();
   }
-  let arrowCursor;
-  function resetArrow() {
-    if (arrowCursor) {
-      arrowCursor = undefined;
-      status.textContent = "";
-    }
-  }
   function apply(p) {
     const x = quantize(p.x, 159), y = quantize(p.y, 159);
     if (tool === "Select") {
@@ -555,20 +713,12 @@ function mount(container, context) {
     else if (tool === "Text")
       editText({ x, y });
     else if (tool === "Rect" || tool === "Hazard") {
-      const w = Math.min(snapping ? 8 : 1, 160 - x), h = Math.min(snapping ? 8 : 1, 160 - y);
+      const w = Math.min(STEP, 160 - x), h = Math.min(STEP, 160 - y);
       commit({ ...board, shapes: [...board.shapes, { id: allocateId(board), kind: tool === "Rect" ? "rect" : "hazard", x, y, w, h }] });
-    } else if (tool === "Arrow") {
-      if (!arrowCursor) {
-        arrowCursor = { x, y };
-        status.textContent = "Move cursor and press Enter for the arrow end";
-      } else {
-        commit(gestureBoard({ id: 0, start: arrowCursor, current: { x, y }, original: board, resize: false, tool: "Arrow" }));
-        arrowCursor = undefined;
-      }
     }
   }
   listen(canvas, "keydown", (event) => {
-    const e = event, step = snapping ? 8 : 1, delta = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+    const e = event, step = STEP, delta = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
     if (delta[e.key]) {
       e.preventDefault();
       const [dx, dy] = delta[e.key];
@@ -578,12 +728,14 @@ function mount(container, context) {
         cursor = { x: Math.max(0, Math.min(159, cursor.x + dx)), y: Math.max(0, Math.min(159, cursor.y + dy)) };
         draw();
       }
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      resetArrow();
     } else if (e.key === "Enter") {
       e.preventDefault();
-      apply(cursor);
+      if (tool === "Draw") {
+        const x = Math.min(cursor.x, 144), y = cursor.y;
+        commit({ ...board, shapes: [...board.shapes, { id: allocateId(board), kind: "stroke", points: [[x, y], [x + 16, y]] }] });
+        refresh();
+      } else
+        apply(cursor);
     } else if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
       if (selected) {

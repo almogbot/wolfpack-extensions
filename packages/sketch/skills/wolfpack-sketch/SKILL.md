@@ -20,11 +20,12 @@ hazard <id> <x> <y> <w> <h> ["label"];
 start <id> <x> <y> ["label"];
 goal <id> <x> <y> ["label"];
 text <id> <x> <y> "label";
+stroke <id> <x>,<y> <x>,<y> … ["label"];
 arrow <id> <end>-><end> ["label"];
 end;
 ```
 
-An endpoint is independently an existing non-arrow id or `x,y`. Only `\"` and `\\` escape quoted labels; semicolons inside quotes are label data. Unknown statements, bad escapes, missing footer and mismatched count are errors, never silently ignored. This standalone decoder returns `{base,board}`:
+A `stroke` is a freehand polyline of 2..48 `x,y` points (integers 0..160, written `x,y`; whitespace around tokens is cosmetic): treat it as a solid ground/platform surface unless its label says otherwise. Its label is a wish, never authority. An endpoint is independently an existing non-arrow id or `x,y`. Only `\"` and `\\` escape quoted labels; semicolons inside quotes are label data. Unknown statements, bad escapes, missing footer and mismatched count are errors, never silently ignored. This standalone decoder returns `{base,board}`:
 
 ```js
 function decode(text) {
@@ -36,6 +37,7 @@ function decode(text) {
  while(tokens[i]!=='end'){
   const kind=take(),s={kind,id:take()};
   if(kind==='arrow'){for(const [ref,x,y] of [['from','x1','y1'],['to','x2','y2']]){if(/^\d+$/.test(tokens[i]||'')){s[x]=number();need(',');s[y]=number()}else s[ref]=take();if(ref==='from')need('->')}}
+  else if(kind==='stroke'){const pts=[];while(/^\d+$/.test(tokens[i]||'')){const x=number();need(',');pts.push([x,number()])}s.points=pts}
   else if(['rect','hazard','start','goal','text'].includes(kind)){s.x=number();s.y=number();if(kind==='rect'||kind==='hazard'){s.w=number();s.h=number()}}
   else throw Error(`Unknown statement ${kind}`);
   if(tokens[i]?.startsWith('"'))s.label=JSON.parse(take());need(';');shapes.push(s);
@@ -44,6 +46,7 @@ function decode(text) {
  const ids=new Set(),validId=s=>/^[a-z][a-z0-9]{0,7}$/.test(s),hidden=/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
  for(const s of shapes){if(!validId(s.id)||ids.has(s.id))throw Error('Invalid or duplicate id');ids.add(s.id);if(s.label!==undefined&&([...s.label].length>80||hidden.test(s.label)))throw Error('Invalid label');
   if(s.kind==='arrow'){for(const [ref,x,y] of [['from','x1','y1'],['to','x2','y2']]){if(s[ref]!==undefined){if(!validId(s[ref])||!shapes.some(t=>t.id===s[ref]&&t.kind!=='arrow'))throw Error('Invalid arrow target')}else if(!integer(s[x],160)||!integer(s[y],160))throw Error('Invalid arrow coordinates')}}
+  else if(s.kind==='stroke'){if(s.points.length<2||s.points.length>48||s.points.some(p=>!integer(p[0],160)||!integer(p[1],160)))throw Error('Invalid stroke')}
   else {if(!integer(s.x,159)||!integer(s.y,159))throw Error('Invalid point');if('w' in s&&(!integer(s.w,160,1)||!integer(s.h,160,1)||s.x+s.w>160||s.y+s.h>160))throw Error('Invalid rectangle');if(s.kind==='text'&&!s.label)throw Error('Text label required')}
  }
  return {base,board:{schemaVersion:1,size:160,shapes}};
@@ -53,7 +56,7 @@ function decode(text) {
 ## Publishing back
 
 1. Pin the scope: run `wolfpack session current-context --json`. Require exit 0, `ok: true`, `verified: true`, a canonical `sessionId` UUID and the expected `projectDir`. Never guess from names, lists, process scanning, raw environment or unverified older output. For an explicitly supplied UUID, use `wolfpack session status <exact-uuid> --json`, requiring the identical UUID, expected project and live/ready terminal. Stop on failure or unexpected project; keep the resolved UUID fixed.
-2. Read `wolfpack extension-data read sketch/board --session <exact-uuid> --json`. Write board.json according to `schemas/board.schema.json`: exactly `schemaVersion:1`, `size:160`, `shapes`, optional `note` (≤2000 characters, newline allowed). ≤200 shapes; unique ids `^[a-z][a-z0-9]{0,7}$`; integer points 0..159; boxes positive width/height with `x+w,y+h ≤160`; arrow coordinates 0..160, each endpoint exactly id or coordinate pair referencing non-arrow shapes only; labels ≤80 (text 1..80). Reject Unicode Cc, Cf, Zl, Zp and Default_Ignorable_Code_Point characters in labels and notes (only newline may appear in note). Note is visible plain text and is not composed.
+2. Read `wolfpack extension-data read sketch/board --session <exact-uuid> --json`. Write board.json according to `schemas/board.schema.json`: exactly `schemaVersion:1`, `size:160`, `shapes`, optional `note` (≤2000 characters, newline allowed). ≤200 shapes; unique ids `^[a-z][a-z0-9]{0,7}$`; integer points 0..159; boxes positive width/height with `x+w,y+h ≤160`; stroke `points` 2..48 pairs of integers 0..160 (`[[x,y],…]`); arrow coordinates 0..160, each endpoint exactly id or coordinate pair referencing non-arrow shapes only; labels ≤80 (text 1..80). Reject Unicode Cc, Cf, Zl, Zp and Default_Ignorable_Code_Point characters in labels and notes (only newline may appear in note). Note is visible plain text and is not composed.
 3. Publish with the read revision and a fresh request ID:
    ```sh
    wolfpack extension-data publish sketch/board --session <exact-uuid> --file board.json --if-revision <read-revision> --request-id <fresh-uuid> --json

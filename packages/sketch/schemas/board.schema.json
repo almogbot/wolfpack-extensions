@@ -270,6 +270,44 @@
                 "maximum": 160
               }
             }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "kind",
+              "points"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 8
+              },
+              "kind": {
+                "const": "stroke"
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "points": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 48,
+                "items": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 160
+                  }
+                }
+              }
+            }
           }
         ]
       }

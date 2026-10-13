@@ -47,3 +47,36 @@ test('bytes, snap, ids, hit test and delete detach at centre',()=>{
  expect(model.allocateId(b)).toBe('s1');expect(model.hitTest(b,3,150)?.id).toBe('a');
  const deleted=model.deleteShape(b,'a');expect(deleted.shapes.at(-1)).toEqual({id:'e2',kind:'arrow',x1:80,y1:152,to:'p'});expect(b.shapes[0].id).toBe('a');
 });
+const strokeBoard=(points:unknown,extra:object={})=>({schemaVersion:1,size:160,shapes:[{id:'s3',kind:'stroke',points,...extra}]});
+test('stroke parses, serializes, round trips and rejects invalid shapes',()=>{
+ const b=model.parseBoard(strokeBoard([[10,140],[30,138],[160,0]],{label:'ground'})),text=model.serializeBoard(b,2);
+ expect(text).toBe('sketch v1 160x160 shapes=1 base=2;\nstroke s3 10,140 30,138 160,0 "ground";\nend;');
+ expect(model.parseComposeText(text)).toEqual({base:2,board:b});expect(model.parseComposeText(text.replaceAll('\n',' ')).board).toEqual(b);
+ const pts=(n:number)=>Array.from({length:n},(_,i)=>[i,i]);
+ expect(model.parseBoard(strokeBoard(pts(2))).shapes.length).toBe(1);expect(model.parseBoard(strokeBoard(pts(48))).shapes.length).toBe(1);
+ for(const bad of [pts(1),pts(49),[[0,0],[161,0]],[[0,0],[-1,0]],[[0,0],[1.5,0]],[[0,0],[1]],[[0,0],[1,2,3]],[[0,0],'ab'],'x',[]])expect(()=>model.parseBoard(strokeBoard(bad))).toThrow();
+ expect(()=>model.parseBoard(strokeBoard(pts(2),{x:1}))).toThrow();expect(()=>model.parseBoard(strokeBoard(pts(2),{label:'a‮'}))).toThrow();
+ const mk=(body:string)=>`sketch v1 160x160 shapes=1 base=0; ${body} end;`;
+ for(const bad of ['stroke s 1,1;','stroke s 1,1 2 2;','stroke s 1,1 2,;','stroke s 1 1 2 2;','stroke s 161,1 2,2;','stroke s 1,1 2,2 3;'])expect(()=>model.parseComposeText(mk(bad))).toThrow();
+});
+test('stroke hit test uses distance to polyline, move shifts every point clamped, delete removes',()=>{
+ const b=model.parseBoard({schemaVersion:1,size:160,shapes:[{id:'s1',kind:'stroke',points:[[10,100],[50,100],[50,140]]}]});
+ expect(model.hitTest(b,30,103,4)?.id).toBe('s1');expect(model.hitTest(b,30,110,4)).toBeUndefined();expect(model.hitTest(b,52,120,4)?.id).toBe('s1');expect(model.hitTest(b,60,100,4)).toBeUndefined();
+ expect(model.moveShape(b,'s1',8,-8).shapes[0]).toMatchObject({points:[[18,92],[58,92],[58,132]]});
+ expect(model.moveShape(b,'s1',-100,100).shapes[0]).toMatchObject({points:[[0,120],[40,120],[40,160]]});
+ expect(model.deleteShape(b,'s1').shapes).toEqual([]);
+});
+test('simplifyStroke applies RDP, caps at 48 points and ignores short paths',()=>{
+ const line=Array.from({length:100},(_,i)=>({x:i,y:50+(i%2)*0.4}));
+ expect(model.simplifyStroke(line)).toEqual([[0,50],[99,50]]);
+ const wave=Array.from({length:400},(_,i)=>({x:i*0.4,y:80+30*Math.sin(i/6)})),simple=model.simplifyStroke(wave)!;
+ expect(simple.length).toBeGreaterThan(2);expect(simple.length).toBeLessThanOrEqual(48);expect(()=>model.parseBoard({schemaVersion:1,size:160,shapes:[{id:'s1',kind:'stroke',points:simple}]})).not.toThrow();
+ const zig=Array.from({length:300},(_,i)=>({x:(i*7)%160,y:(i*13)%160}));expect(model.simplifyStroke(zig)!.length).toBeLessThanOrEqual(48);
+ expect(model.simplifyStroke([{x:10,y:10},{x:11,y:11}])).toBeUndefined();expect(model.simplifyStroke([{x:10,y:10}])).toBeUndefined();
+ expect(model.simplifyStroke([{x:-5,y:200},{x:170,y:300}])).toEqual([[0,160],[160,160]]);
+});
+test('simplifyStroke handles 5000 samples and worst-case recursion shapes without error',()=>{
+ const arc=Array.from({length:5000},(_,i)=>({x:i*0.032,y:160-Math.sqrt(Math.max(0,160*160-(i*0.032)**2))*0.5})),noisy=Array.from({length:5000},(_,i)=>({x:(i*37)%161,y:(i*91)%161}));
+ for(const path of [arc,noisy]){const out=model.simplifyStroke(path)!;expect(out.length).toBeGreaterThanOrEqual(2);expect(out.length).toBeLessThanOrEqual(48)}
+ const spiral=Array.from({length:60000},(_,i)=>({x:i/400,y:(i/400)**2/160}));expect(model.simplifyStroke(spiral)!.length).toBeLessThanOrEqual(48);
+});
