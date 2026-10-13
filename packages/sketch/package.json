@@ -1,0 +1,40 @@
+{
+  "name": "wolfpack-extension-sketch",
+  "version": "0.1.0",
+  "description": "A touch-first drawing board beside your Wolfpack terminal.",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "schemas",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "wolfpack": {
+    "manifestVersion": 1,
+    "apiVersion": 1,
+    "id": "sketch",
+    "ui": "dist/ui.js",
+    "skills": [
+      "skills/wolfpack-sketch"
+    ],
+    "documents": [
+      {
+        "id": "board",
+        "schemaVersion": 1,
+        "schema": "schemas/board.schema.json"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json",
+    "test": "bun test test",
+    "check:package": "bun run scripts/check-package.ts",
+    "check:package-negative": "bun run scripts/check-package-negative.ts",
+    "pack": "bun run scripts/pack.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
