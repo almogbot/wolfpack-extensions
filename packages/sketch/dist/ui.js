@@ -456,6 +456,8 @@ function mount(container, context) {
     }
     return shape ? { ...g.original, shapes: [...g.original.shapes, shape] } : g.original;
   }
+  for (const name of ["touchstart", "touchmove"])
+    listen(canvas, name, (event) => event.stopPropagation());
   listen(canvas, "pointerdown", (event) => {
     const e = event;
     if (gesture || e.button !== 0)

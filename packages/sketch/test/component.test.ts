@@ -86,6 +86,9 @@ test('review 3 text body and CSS-sized point and arrow targets select',async()=>
   await publish(p,board([{id:'a',kind:'arrow',x1:16,y1:80,x2:144,y2:80}]),3);const arrow=await point(p,80,80);await p.touchscreen.tap(arrow.x,arrow.y+15);await tool(p,'Delete');expect(parseComposeText(await composed(p)).board.shapes).toEqual([]);expect(f.errors).toEqual([]);
  }finally{await f.close()}
 },15000);
+test('canvas touches do not reach host swipe navigation',async()=>{
+ const f=await fixture(),p=f.page;try{await p.evaluate(()=>{const w=globalThis as any;w.hostTouches=0;for(const n of ['touchstart','touchmove'])document.body.addEventListener(n,()=>w.hostTouches++,{passive:true})});await tool(p,'Rect');await drag(p,0,144,158,158);expect(await p.evaluate(()=>(globalThis as any).hostTouches)).toBe(0);expect(parseComposeText(await composed(p)).board.shapes.length).toBe(1);expect(f.errors).toEqual([])}finally{await f.close()}
+},15000);
 test('review 2 Select tap preserves off-grid selection',async()=>{
  const f=await fixture(),p=f.page;try{await publish(p,board([{id:'g',kind:'goal',x:13,y:13}]),1);await tool(p,'Select');await tap(p,13,13);await tool(p,'Delete');expect(parseComposeText(await composed(p)).board.shapes).toEqual([]);expect(f.errors).toEqual([])}finally{await f.close()}
 },15000);

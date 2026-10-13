@@ -60,6 +60,8 @@ function mount(container:HTMLElement,context:ExtensionViewContext){
   if(g.tool==='Arrow'){const from=hit(g.original,g.start.x,g.start.y,true),to=hit(g.original,g.current.x,g.current.y,true);shape={id,kind:'arrow',...(from?{from:from.id}:{x1:a.x,y1:a.y}),...(to?{to:to.id}:{x2:z.x,y2:z.y})}}
   return shape?{...g.original,shapes:[...g.original.shapes,shape]}:g.original;
  }
+ // The host's edge back-swipe listens for bubbling touch events; drawing must not reach it.
+ for(const name of ['touchstart','touchmove'])listen(canvas,name,event=>event.stopPropagation());
  listen(canvas,'pointerdown',(event)=>{const e=event as PointerEvent;if(gesture||e.button!==0)return;e.preventDefault();canvas.focus();const p=position(e),s=board.shapes.find(s=>s.id===selected),radius=cssUnits(12),handle=s&&'w' in s&&Math.abs(p.x-s.x-s.w)<=radius&&Math.abs(p.y-s.y-s.h)<=radius;
   if(tool==='Select'&&!handle)selected=hit(board,p.x,p.y)?.id;
   gesture={id:e.pointerId,start:p,current:p,original:board,selection:selected,resize:!!handle,tool};canvas.setPointerCapture(e.pointerId);draw();
