@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { chromium, type Browser } from "@playwright/test";
+import { chromium, type Browser, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
 const root = join(import.meta.dirname, "..");
@@ -22,12 +22,31 @@ async function component({ launch = () => chromium.launch({ headless: true, ...(
       module.default({ registerContextView(value: any) { contribution = value; }, registerTerminalLayout() {} });
       const git = { calls: 0, value: { state: "not-repository" } as any, fail: false, pending: false, signals: [] as AbortSignal[], releases: [] as Array<(value: any) => void> };
       (globalThis as any).__git = git;
-      const mount = () => contribution.mount(document.querySelector("main"), { signal: abort.signal, scope: { installationId: "installation", sessionId: "11111111-1111-4111-8111-111111111111" }, selection: { selectedSessionId: null }, theme: {}, storage: { get: () => null, set() {}, remove() {} }, documents: { read: async () => null, subscribe() { return () => {}; } }, project: { gitStatus: async (signal: AbortSignal) => { git.calls++; git.signals.push(signal); if (git.fail) throw Error("unavailable"); return git.pending ? new Promise(resolve => git.releases.push(resolve)) : git.value; } } });
+      // Shared across remounts, like host localStorage for one installation/session scope.
+      const store = { values: new Map<string, string>(), failGet: false, failSet: false, gets: 0, sets: 0 };
+      (globalThis as any).__storage = store;
+      const storage = {
+        get: (key: string) => { store.gets++; if (store.failGet) throw Error("storage get unavailable"); return store.values.get(key) ?? null; },
+        set: (key: string, value: string) => { store.sets++; if (store.failSet) throw Error("storage quota exceeded"); store.values.set(key, value); },
+        remove: (key: string) => { store.values.delete(key); },
+      };
+      const mount = () => contribution.mount(document.querySelector("main"), { signal: abort.signal, scope: { installationId: "installation", sessionId: "11111111-1111-4111-8111-111111111111" }, selection: { selectedSessionId: null }, theme: {}, storage, documents: { read: async () => null, subscribe() { return () => {}; } }, project: { gitStatus: async (signal: AbortSignal) => { git.calls++; git.signals.push(signal); if (git.fail) throw Error("unavailable"); return git.pending ? new Promise(resolve => git.releases.push(resolve)) : git.value; } } });
       let controller = mount();
-      (globalThis as any).__sample = { get abort() { return abort; }, get controller() { return controller; } };
+      (globalThis as any).__sample = { get abort() { return abort; }, get controller() { return controller; }, remount() { abort.abort(); abort = new AbortController(); controller = mount(); controller.setVisible(true); } };
     });
     return { page, async close() { await browser!.close(); server.stop(true); } };
   } catch (error) { await browser?.close(); server.stop(true); throw error; }
+}
+
+/** Native `<details>` toggle events are queued tasks; page.clock fakes timers, so flush with real message tasks. */
+async function flushTasks(page: Page) {
+  for (let round = 0; round < 2; round++) await page.evaluate(() => new Promise(resolve => { const channel = new MessageChannel(); channel.port1.onmessage = () => resolve(null); channel.port2.postMessage(0); }));
+}
+function pageErrors(page: Page): string[] {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  return errors;
 }
 
 test("Changes component retains stale data honestly, pauses hidden reads and ignores late responses after disposal", async () => {
@@ -237,6 +256,101 @@ test("Changes nests native directory disclosures, isolates collapse and preserve
     await page.clock.fastForward(5000);
     await page.waitForFunction(() => (document.querySelector('[data-group="staged"]') as HTMLElement).hidden);
     expect(await page.getByRole("button", { name: "Refresh Git status" }).evaluate(node => node === document.activeElement)).toBe(true);
+  } finally { await fixture.close(); }
+}, 20_000);
+
+test("Changes restores group and directory disclosures after remount and never writes them on polls", async () => {
+  const fixture = await component();
+  try {
+    const { page } = fixture; await page.clock.install();
+    const errors = pageErrors(page);
+    await page.evaluate(() => {
+      (globalThis as any).__git.value = { state: "ready", branch: "persist", detached: false, truncated: false,
+        staged: [{ path: "tests/unit/a.ts", status: "modified" }, { path: "root.ts", status: "added" }],
+        unstaged: [{ path: "tests/unit/a.ts", status: "modified" }],
+        untracked: [{ path: "docs/notes.md", status: "untracked" }],
+      };
+      (globalThis as any).__sample.controller.setVisible(true);
+    });
+    await page.waitForFunction(() => document.querySelector(".wolfpack-changes .branch")?.textContent === "persist");
+    const open = (selector: string) => page.locator(selector).evaluate((node: HTMLDetailsElement) => node.open);
+    const sets = () => page.evaluate(() => (globalThis as any).__storage.sets as number);
+    await page.locator('[data-group="unstaged"] > summary').press("Space");
+    await page.locator('[data-group="staged"] details[data-directory="tests"] > summary').press("Space");
+    await flushTasks(page);
+    const written = await sets();
+    expect(written).toBeGreaterThan(0);
+    // Polls that remove, re-create and add directories must not rewrite persisted state.
+    await page.evaluate(() => { const git = (globalThis as any).__git; git.value.staged = [{ path: "root.ts", status: "added" }]; git.value.untracked.push({ path: "fresh/new/c.ts", status: "untracked" }); });
+    await page.clock.fastForward(5000);
+    await page.waitForFunction(() => document.querySelector('[data-group="staged"] > summary .group-count')?.textContent === "1");
+    await flushTasks(page);
+    await page.evaluate(() => { (globalThis as any).__git.value.staged.push({ path: "tests/unit/a.ts", status: "modified" }); });
+    await page.clock.fastForward(5000);
+    await page.waitForFunction(() => document.querySelector('[data-group="staged"] > summary .group-count')?.textContent === "2");
+    await flushTasks(page);
+    expect(await sets()).toBe(written);
+    expect(await open('[data-group="staged"] details[data-directory="tests"]')).toBe(false);
+    await page.evaluate(() => (globalThis as any).__sample.remount());
+    await page.waitForFunction(() => document.querySelector('[data-group="staged"] details[data-directory="tests/unit"]'));
+    expect(await open('[data-group="unstaged"]')).toBe(false);
+    expect(await open('[data-group="staged"]')).toBe(true);
+    expect(await open('[data-group="untracked"]')).toBe(true);
+    expect(await open('[data-group="staged"] details[data-directory="tests"]')).toBe(false);
+    expect(await open('[data-group="staged"] details[data-directory="tests/unit"]')).toBe(true);
+    expect(await open('[data-group="unstaged"] details[data-directory="tests"]')).toBe(true);
+    await flushTasks(page);
+    expect(await sets()).toBe(written);
+    expect(errors).toEqual([]);
+  } finally { await fixture.close(); }
+}, 20_000);
+
+test("Changes keeps default disclosures working when disclosure storage throws or holds invalid data", async () => {
+  const fixture = await component();
+  try {
+    const { page } = fixture; await page.clock.install();
+    const errors = pageErrors(page);
+    const open = (selector: string) => page.locator(selector).evaluate((node: HTMLDetailsElement) => node.open);
+    const storage = () => page.evaluate(() => { const store = (globalThis as any).__storage; return { gets: store.gets as number, sets: store.sets as number, value: store.values.get("disclosure") as string | undefined }; });
+    const remount = async (setup: string) => {
+      await page.evaluate(setup => {
+        // Dispose first: unmount persists the current state, which would overwrite the planted value.
+        (globalThis as any).__sample.abort.abort();
+        const store = (globalThis as any).__storage; store.failGet = setup === "throw"; store.failSet = setup === "throw";
+        if (setup !== "throw") store.values.set("disclosure", setup);
+        (globalThis as any).__sample.remount();
+      }, setup);
+      await page.waitForFunction(() => document.querySelector('[data-group="staged"] details[data-directory="tests"]'));
+    };
+    await page.evaluate(() => {
+      (globalThis as any).__git.value = { state: "ready", branch: "fallback", detached: false, truncated: false,
+        staged: [{ path: "tests/unit/a.ts", status: "modified" }, { path: "root.ts", status: "added" }], unstaged: [], untracked: [] };
+    });
+    await remount("throw");
+    expect((await storage()).gets).toBeGreaterThan(0);
+    expect(await open('[data-group="staged"]')).toBe(true);
+    expect(await open('[data-group="staged"] details[data-directory="tests"]')).toBe(true);
+    const before = (await storage()).sets;
+    await page.locator('[data-group="staged"] details[data-directory="tests"] > summary').press("Space");
+    await flushTasks(page);
+    expect((await storage()).sets).toBeGreaterThan(before);
+    expect(await open('[data-group="staged"] details[data-directory="tests"]')).toBe(false);
+    await page.locator('[data-group="staged"] > summary').press("Space");
+    expect(await open('[data-group="staged"]')).toBe(false);
+    for (const invalid of ["{not json", "null", "[]", JSON.stringify({ closed: "staged", collapsed: { staged: [1, {}, "x".repeat(5000)], unknown: ["tests"] } })]) {
+      await remount(invalid);
+      expect(await open('[data-group="staged"]')).toBe(true);
+      expect(await open('[data-group="staged"] details[data-directory="tests"]')).toBe(true);
+    }
+    await page.locator('[data-group="staged"] details[data-directory="tests"] > summary').press("Space");
+    await flushTasks(page);
+    expect(JSON.parse((await storage()).value!)).toEqual({ closed: [], collapsed: { staged: ["tests"] } });
+    // Valid entries survive alongside ignored garbage.
+    await remount(JSON.stringify({ closed: ["staged", "bogus"], collapsed: { staged: ["tests/unit", 7] } }));
+    expect(await open('[data-group="staged"]')).toBe(false);
+    expect(await open('[data-group="staged"] details[data-directory="tests"]')).toBe(true);
+    expect(await open('[data-group="staged"] details[data-directory="tests/unit"]')).toBe(false);
+    expect(errors).toEqual([]);
   } finally { await fixture.close(); }
 }, 20_000);
 

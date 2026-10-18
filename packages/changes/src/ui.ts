@@ -36,6 +36,30 @@ function fileRow(change: GitFileChange): HTMLLIElement {
   row.append(path, kind); return row;
 }
 
+type GroupKey = "staged" | "unstaged" | "untracked";
+const GROUP_KEYS: readonly GroupKey[] = ["staged", "unstaged", "untracked"];
+const isGroupKey = (value: unknown): value is GroupKey => GROUP_KEYS.some(key => key === value);
+// One storage key holds closed groups and collapsed directories; bounds stop vanished paths from growing it indefinitely.
+const DISCLOSURE_KEY = "disclosure", MAX_COLLAPSED = 256, MAX_PATH_LENGTH = 4096;
+interface DisclosureState { readonly closed: Set<GroupKey>; readonly collapsed: Record<GroupKey, Set<string>>; }
+
+/** Invalid or foreign stored data falls back to the default expanded state, keeping any valid entries. */
+function parseDisclosure(raw: string | null): DisclosureState {
+  const state: DisclosureState = { closed: new Set(), collapsed: { staged: new Set(), unstaged: new Set(), untracked: new Set() } };
+  let value: unknown;
+  try { value = raw === null ? null : JSON.parse(raw); } catch { return state; }
+  if (!value || typeof value !== "object") return state;
+  const { closed, collapsed } = value as Record<string, unknown>;
+  if (Array.isArray(closed)) for (const key of closed) if (isGroupKey(key)) state.closed.add(key);
+  if (collapsed && typeof collapsed === "object") for (const key of GROUP_KEYS) {
+    const paths = (collapsed as Record<string, unknown>)[key];
+    if (Array.isArray(paths)) for (const path of paths.slice(-MAX_COLLAPSED)) {
+      if (typeof path === "string" && path && path.length <= MAX_PATH_LENGTH) state.collapsed[key].add(path);
+    }
+  }
+  return state;
+}
+
 interface DirectoryDisclosure {
   readonly section: HTMLDetailsElement;
   readonly heading: HTMLElement;
@@ -145,13 +169,25 @@ export default function register(host: ExtensionRegistrationHost): void {
       };
       showMessage("Checking Git…", "loading");
       const files = element("div", "files");
+      const restored = parseDisclosure((() => { try { return context.storage.get(DISCLOSURE_KEY); } catch { return null; } })());
       // Keep disclosures mounted: refresh must not reset collapse state, focus or the scroll container.
-      const groups = (["staged", "unstaged", "untracked"] as const).map(key => {
+      const groups = GROUP_KEYS.map(key => {
         const title = key[0]!.toUpperCase() + key.slice(1), section = element("details"), heading = element("summary"), badge = element("span", "group-count", "0"), list = element("ul");
-        section.dataset.group = key; section.open = true; section.hidden = true;
+        section.dataset.group = key; section.open = !restored.closed.has(key); section.hidden = true;
         list.setAttribute("aria-label", `${title} files`); heading.append(element("span", "", title), badge); section.append(heading, list); files.append(section);
-        return { key, section, heading, badge, list, fingerprint: "", directories: new Map<string, DirectoryDisclosure>(), collapsed: new Set<string>() };
+        return { key, section, heading, badge, list, fingerprint: "", directories: new Map<string, DirectoryDisclosure>(), collapsed: restored.collapsed[key] };
       });
+      // Snapshot directly: native toggle events can be queued until after a refresh.
+      const snapshot = (group: typeof groups[number]) => {
+        for (const [path, directory] of group.directories) {
+          if (directory.section.open) group.collapsed.delete(path); else group.collapsed.add(path);
+        }
+      };
+      const serialize = () => JSON.stringify({
+        closed: groups.filter(group => !group.section.open).map(group => group.key),
+        collapsed: Object.fromEntries(groups.filter(group => group.collapsed.size).map(group => [group.key, [...group.collapsed].slice(-MAX_COLLAPSED)])),
+      });
+      let saved = serialize();
       const footer = element("footer"), automatic = element("span", "auto-refresh", "Auto-refresh · 5s"), updated = element("time", "updated", "Not checked yet");
       automatic.title = "Updates every five seconds while visible, and when you return to this window.";
       footer.append(automatic, updated);
@@ -169,10 +205,7 @@ export default function register(host: ExtensionRegistrationHost): void {
           group.fingerprint = fingerprint; text(group.badge, String(changes.length));
           const focused = document.activeElement;
           const focusedPath = [...group.directories].find(([, directory]) => directory.heading === focused)?.[0];
-          // Snapshot directly: native toggle events can be queued until after a refresh.
-          for (const [path, directory] of group.directories) {
-            if (directory.section.open) group.collapsed.delete(path); else group.collapsed.add(path);
-          }
+          snapshot(group);
           renderPaths(group.list, changes, group.directories, group.collapsed);
           if (focusedPath !== undefined && changes.length) {
             let path = focusedPath, fallback = group.heading;
@@ -222,13 +255,23 @@ export default function register(host: ExtensionRegistrationHost): void {
           }
         }
       };
+      // Only user toggles change the serialized state; polls re-create disclosures without changing it.
+      const persist = () => {
+        if (disposed) return;
+        for (const group of groups) snapshot(group);
+        const value = serialize();
+        if (value === saved) return;
+        // A failed write keeps the widget usable; the next toggle retries.
+        try { context.storage.set(DISCLOSURE_KEY, value); saved = value; } catch {}
+      };
       const onFocus = () => { void read(); };
       const onVisibility = () => { if (active()) void read(); else stop(); };
       const dispose = () => {
         if (disposed) return;
-        disposed = true; stop(); document.removeEventListener("visibilitychange", onVisibility); window.removeEventListener("focus", onFocus);
+        persist(); disposed = true; stop(); document.removeEventListener("visibilitychange", onVisibility); window.removeEventListener("focus", onFocus);
         context.signal.removeEventListener("abort", dispose); root.remove();
       };
+      files.addEventListener("toggle", persist, true);
       refresh.addEventListener("click", onFocus);
       window.addEventListener("focus", onFocus);
       document.addEventListener("visibilitychange", onVisibility);

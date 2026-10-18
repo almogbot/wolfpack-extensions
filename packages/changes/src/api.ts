@@ -18,6 +18,7 @@ export type ProjectGitStatus = { readonly state: "not-repository" } | {
 };
 export interface ExtensionViewContext {
   readonly signal: AbortSignal;
+  readonly storage: Readonly<{ get(key: string): string | null; set(key: string, value: string): void; remove(key: string): void }>;
   readonly project: Readonly<{ gitStatus(signal?: AbortSignal): Promise<ProjectGitStatus> }>;
 }
 export interface ExtensionRegistrationHost {
