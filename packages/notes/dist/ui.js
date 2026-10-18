@@ -50,12 +50,29 @@ function register(host) {
       const status = document.createElement("p");
       status.className = "wn-status";
       status.setAttribute("role", "status");
+      const unreadable = "Saved notes could not be loaded. Edits are not saved until they can be.";
+      let loaded = false;
       try {
         editor.value = context.storage.get("notes") ?? "";
+        loaded = true;
       } catch {
-        setText(status, "Saved notes could not be loaded.");
+        setText(status, unreadable);
       }
       editor.addEventListener("input", () => {
+        if (!loaded) {
+          let saved;
+          try {
+            saved = context.storage.get("notes");
+          } catch {
+            setText(status, unreadable);
+            return;
+          }
+          if (saved) {
+            setText(status, "Saved notes exist but were not loaded. Reopen Notes to see them; edits here are not saved.");
+            return;
+          }
+          loaded = true;
+        }
         try {
           context.storage.set("notes", editor.value);
           setText(status, "");

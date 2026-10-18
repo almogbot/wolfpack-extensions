@@ -69,6 +69,20 @@ test("Notes restores saved text after remount and reports storage failures witho
     expect(await page.locator("main textarea").count()).toBe(1);
     expect(await editor.inputValue()).toBe("");
     expect(await status.textContent()).toContain("could not be loaded");
+    // Unread saved notes must never be overwritten by edits typed after a failed load.
+    await editor.fill("while unreadable");
+    expect(await stored()).toBe("unsaved edit saved");
+    expect(await status.textContent()).toContain("could not be loaded");
+    await page.evaluate(() => { (globalThis as any).__notes.store.failGet = false; });
+    await editor.fill("after recovery");
+    expect(await stored()).toBe("unsaved edit saved");
+    expect(await editor.inputValue()).toBe("after recovery");
+    expect(await status.textContent()).toContain("Reopen Notes");
+    // With nothing saved, a recovered read lets saving resume and clears the status.
+    await page.evaluate(() => { const store = (globalThis as any).__notes.store; store.values.delete("notes"); store.failGet = true; (globalThis as any).__notes.mount(); store.failGet = false; });
+    await editor.fill("recovered");
+    expect(await stored()).toBe("recovered");
+    expect(await status.textContent()).toBe("");
     expect(errors).toEqual([]);
   } finally { try { await value.browser.close(); } finally { value.server.stop(true); } }
 }, 20_000);
