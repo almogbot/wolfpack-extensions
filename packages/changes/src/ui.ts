@@ -1,3 +1,6 @@
+import { html } from "diff2html";
+import { ColorSchemeType } from "diff2html/lib-esm/types";
+import diffStyles from "diff2html/bundles/css/diff2html.min.css" with { type: "text" };
 import type { ExtensionRegistrationHost, GitFileChange, ProjectGitStatus } from "./api.ts";
 
 const STATUS: Record<GitFileChange["status"], readonly [string, string]> = {
@@ -36,6 +39,67 @@ function fileRow(change: GitFileChange): HTMLLIElement {
   row.append(path, kind); return row;
 }
 
+interface DiffRow {
+  readonly key: string;
+  readonly row: HTMLLIElement;
+  readonly details: HTMLDetailsElement;
+  readonly summary: HTMLElement;
+  readonly body: HTMLElement;
+  readonly paths: readonly string[];
+  rendered?: object;
+}
+/** A staged/unstaged file row whose summary is the plain row content and whose body holds that file's diff. */
+function diffRow(change: GitFileChange): DiffRow {
+  const row = fileRow(change), details = element("details", "file-diff"), summary = element("summary"), body = element("div", "diff");
+  summary.setAttribute("aria-label", row.getAttribute("aria-label")!); row.removeAttribute("aria-label");
+  summary.append(...row.childNodes); details.append(summary, body); row.append(details); row.classList.add("diff-row");
+  // Status reports renames although diffs disable them: show both sides.
+  return { key: JSON.stringify(change), row, details, summary, body, paths: change.previousPath ? [change.previousPath, change.path] : [change.path] };
+}
+
+const ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+/** Decodes the inside of a Git C-quoted path, whose octal escapes are UTF-8 bytes. */
+function unquote(quoted: string): string {
+  const bytes: number[] = [], encoder = new TextEncoder();
+  for (const [, escape, plain] of quoted.matchAll(/\\([0-7]{3}|.)|([^\\]+)/gs)) {
+    if (plain !== undefined) bytes.push(...encoder.encode(plain));
+    else bytes.push(/^[0-7]/.test(escape!) ? parseInt(escape!, 8) : ESCAPES[escape!] ?? escape!.charCodeAt(0));
+  }
+  return new TextDecoder().decode(Uint8Array.from(bytes));
+}
+// The body of a C-quoted string, captured.
+const QUOTED = String.raw`((?:[^"\\]|\\.)*)`;
+/** The file a section header names. Renames are disabled, so both sides of a two-way header are the same path. */
+function headerPath(header: string): string | undefined {
+  const twoWay = /^diff --git (.*)$/.exec(header);
+  if (!twoWay) {
+    // Unmerged paths use a combined header naming the path once, without a/ or b/.
+    const combined = /^diff --(?:cc|combined) (.*)$/.exec(header)?.[1];
+    const quoted = combined && new RegExp(`^"${QUOTED}"$`).exec(combined);
+    return quoted ? unquote(quoted[1]!) : combined;
+  }
+  const sides = twoWay[1]!, quoted = new RegExp(String.raw`^"a/${QUOTED}" "b/\1"$`).exec(sides);
+  if (quoted) return unquote(quoted[1]!);
+  const path = sides.slice(2, 2 + (sides.length - 5) / 2);
+  return sides === `a/${path} b/${path}` ? path : undefined;
+}
+/** Splits one diff section into per-file sections keyed by repository path. */
+function indexDiff(text: string): Map<string, string> {
+  const files = new Map<string, string>();
+  // `--cached` interleaves "* Unmerged path" lines that carry no diff.
+  for (const section of text.split(/^(?=diff --|\* Unmerged path )/m)) {
+    const path = section.startsWith("diff --") ? headerPath(section.split("\n", 1)[0]!) : undefined;
+    if (path !== undefined) files.set(path, section);
+  }
+  return files;
+}
+// diff2html declares variables on :host/:root and styles generic .line-num classes; keep every rule inside the widget.
+const DIFF_STYLES = diffStyles.replace(/(^|[{}])([^{}@]+)\{/g, (_, end: string, selectors: string) =>
+  `${end}${selectors.split(",").map(selector => /^:(?:host|root)$/.test(selector.trim()) ? ".wolfpack-changes" : `.wolfpack-changes ${selector}`).join(",")}{`);
+const DIFF_OPTIONS = { drawFileList: false, outputFormat: "line-by-line", matching: "none", colorScheme: ColorSchemeType.DARK } as const;
+type DiffSection = "staged" | "unstaged";
+type DiffResult = { readonly state: "not-repository" } | { readonly state: "ready"; readonly truncated: boolean } & Readonly<Record<DiffSection, Map<string, string>>>;
+
 type GroupKey = "staged" | "unstaged" | "untracked";
 const GROUP_KEYS: readonly GroupKey[] = ["staged", "unstaged", "untracked"];
 const isGroupKey = (value: unknown): value is GroupKey => GROUP_KEYS.some(key => key === value);
@@ -66,7 +130,7 @@ interface DirectoryDisclosure {
   readonly list: HTMLUListElement;
 }
 
-function renderPaths(list: HTMLUListElement, changes: readonly GitFileChange[], directories: Map<string, DirectoryDisclosure>, collapsed: Set<string>): void {
+function renderPaths(list: HTMLUListElement, changes: readonly GitFileChange[], directories: Map<string, DirectoryDisclosure>, collapsed: Set<string>, row: (change: GitFileChange) => HTMLElement): void {
   const available = new Set<string>();
   const children = new Map<HTMLUListElement, HTMLElement[]>();
   const append = (parent: HTMLUListElement, child: HTMLElement) => {
@@ -93,7 +157,7 @@ function renderPaths(list: HTMLUListElement, changes: readonly GitFileChange[], 
       }
       parent = disclosure.list;
     }
-    append(parent, fileRow(change));
+    append(parent, row(change));
   }
   for (const [parent, rows] of children) parent.replaceChildren(...rows);
   for (const path of directories.keys()) if (!available.has(path)) directories.delete(path);
@@ -104,6 +168,8 @@ export default function register(host: ExtensionRegistrationHost): void {
     id: "changes", title: "Changes",
     mount(container, context) {
       const root = element("section", "wolfpack-changes"); root.setAttribute("aria-label", "Git changes");
+      // Hosts without project.gitDiff get the plain status view.
+      const diffs = typeof context.project.gitDiff === "function";
       const style = element("style");
       style.textContent = `
 .wolfpack-changes{display:flex;flex-direction:column;gap:10px;min-width:0;height:100%;color:var(--text-primary,#dce5df);font:13px/1.5 system-ui}
@@ -117,7 +183,7 @@ export default function register(host: ExtensionRegistrationHost): void {
 .wolfpack-changes .branch{font:600 12px/1.5 monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .wolfpack-changes .refresh{display:grid;place-items:center;flex:none;width:32px;height:32px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--text-muted,#a4b2a9);cursor:pointer}
 .wolfpack-changes .refresh:hover{background:var(--bg-hover,#1b231e);color:var(--text-primary,#dce5df);border-color:var(--border,#28312b)}
-.wolfpack-changes .refresh:focus-visible,.wolfpack-changes summary:focus-visible{outline:2px solid var(--accent,#45ed7e);outline-offset:-2px}
+.wolfpack-changes .refresh:focus-visible,.wolfpack-changes .refresh-diffs:focus-visible,.wolfpack-changes .d2h-file-diff:focus-visible,.wolfpack-changes summary:focus-visible{outline:2px solid var(--accent,#45ed7e);outline-offset:-2px}
 .wolfpack-changes .refresh[aria-busy=true] svg{animation:wolfpack-changes-refresh 1s linear infinite}
 @keyframes wolfpack-changes-refresh{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.wolfpack-changes .refresh[aria-busy=true] svg{animation:none}}
@@ -156,7 +222,27 @@ export default function register(host: ExtensionRegistrationHost): void {
 .wolfpack-changes .auto-refresh::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--accent,#45ed7e)}
 .wolfpack-changes[data-stale=true] .auto-refresh::before{background:#f1c576}
 @media(pointer:coarse),(max-width:600px){.wolfpack-changes .refresh{width:44px;height:44px}.wolfpack-changes summary{min-height:44px}}
-`;
+${diffs ? DIFF_STYLES + `
+.wolfpack-changes{--d2h-dark-color:var(--text-primary,#dce5df);--d2h-dark-bg-color:var(--bg-inset,#0d100e);--d2h-dark-border-color:var(--border,#28312b);--d2h-dark-line-border-color:var(--border-subtle,#1f2621);--d2h-dark-dim-color:var(--text-muted,#a4b2a9);--d2h-dark-file-header-bg-color:var(--bg-elevated,#1c211e);--d2h-dark-file-header-border-color:var(--border,#28312b)}
+.wolfpack-changes li.diff-row{display:block;padding:0}
+.wolfpack-changes li.diff-row:hover{background:none}
+.wolfpack-changes details.file-diff{margin:0;min-width:0}
+.wolfpack-changes .file-diff>summary{gap:10px;padding:5px 7px;background:none;font-size:inherit;font-weight:400}
+.wolfpack-changes .file-diff>summary:hover{background:var(--bg-hover,#1b231e)}
+.wolfpack-changes .diff{min-width:0;margin:2px 0 6px 12px}
+.wolfpack-changes .diff-note{margin:0;padding:6px 8px;font-size:12px;color:var(--text-muted,#a4b2a9)}
+.wolfpack-changes .d2h-file-header{display:none}
+.wolfpack-changes .d2h-file-wrapper{margin:0 0 4px;border-radius:4px}
+.wolfpack-changes .d2h-file-diff{overflow-x:auto}
+.wolfpack-changes .d2h-diff-table{font:12px/1.5 var(--font-mono,monospace)}
+.wolfpack-changes .diff-bar{display:flex;align-items:center;gap:8px;flex:none;min-width:0;font-size:12px;color:var(--text-muted,#a4b2a9)}
+.wolfpack-changes .diff-bar p{margin:0;min-width:0}
+.wolfpack-changes .diff-bar[data-stale=true] p{color:#f1c576}
+.wolfpack-changes .refresh-diffs{flex:none;margin-left:auto;min-height:32px;padding:0 10px;border:1px solid var(--border,#28312b);border-radius:6px;background:transparent;color:var(--text-primary,#dce5df);font:inherit;cursor:pointer}
+.wolfpack-changes .refresh-diffs:hover{background:var(--bg-hover,#1b231e)}
+.wolfpack-changes .refresh-diffs[aria-busy=true]{cursor:progress}
+@media(pointer:coarse),(max-width:600px){.wolfpack-changes .refresh-diffs{min-height:44px}}
+` : ""}`;
       const header = element("header"), branchHeading = element("div", "branch-heading"), branch = element("span", "branch", "Git"), refresh = element("button", "refresh");
       refresh.type = "button"; refresh.title = "Refresh Git status"; refresh.setAttribute("aria-label", "Refresh Git status"); refresh.append(icon("refresh"));
       branchHeading.append(icon("branch"), branch); header.append(branchHeading, refresh);
@@ -168,6 +254,8 @@ export default function register(host: ExtensionRegistrationHost): void {
         notice.hidden = !value; notice.dataset.kind = kind; text(message, value); text(symbol, mark); symbol.hidden = !mark;
       };
       showMessage("Checking Git…", "loading");
+      const diffBar = element("div", "diff-bar"), diffMessage = element("p"), refreshDiffs = element("button", "refresh-diffs", "Refresh diffs");
+      diffBar.hidden = true; diffMessage.setAttribute("role", "status"); refreshDiffs.type = "button"; diffBar.append(diffMessage, refreshDiffs);
       const files = element("div", "files");
       const restored = parseDisclosure((() => { try { return context.storage.get(DISCLOSURE_KEY); } catch { return null; } })());
       // Keep disclosures mounted: refresh must not reset collapse state, focus or the scroll container.
@@ -175,7 +263,7 @@ export default function register(host: ExtensionRegistrationHost): void {
         const title = key[0]!.toUpperCase() + key.slice(1), section = element("details"), heading = element("summary"), badge = element("span", "group-count", "0"), list = element("ul");
         section.dataset.group = key; section.open = !restored.closed.has(key); section.hidden = true;
         list.setAttribute("aria-label", `${title} files`); heading.append(element("span", "", title), badge); section.append(heading, list); files.append(section);
-        return { key, section, heading, badge, list, fingerprint: "", directories: new Map<string, DirectoryDisclosure>(), collapsed: restored.collapsed[key] };
+        return { key, section, heading, badge, list, fingerprint: "", directories: new Map<string, DirectoryDisclosure>(), collapsed: restored.collapsed[key], rows: new Map<string, DiffRow>() };
       });
       // Snapshot directly: native toggle events can be queued until after a refresh.
       const snapshot = (group: typeof groups[number]) => {
@@ -191,12 +279,65 @@ export default function register(host: ExtensionRegistrationHost): void {
       const footer = element("footer"), automatic = element("span", "auto-refresh", "Auto-refresh · 5s"), updated = element("time", "updated", "Not checked yet");
       automatic.title = "Updates every five seconds while visible, and when you return to this window.";
       footer.append(automatic, updated);
-      root.append(style, header, summary, notice, files, footer); container.replaceChildren(root);
+      root.append(style, header, summary, notice, ...diffs ? [diffBar] : [], files, footer); container.replaceChildren(root);
       let visible = false, disposed = false, timer: ReturnType<typeof setTimeout> | undefined;
       let request: AbortController | undefined, hasResult = false;
+      // One diff read serves every open row; it is refetched only for a changed status or an explicit refresh.
+      let diff: DiffResult | undefined, diffFingerprint = "", diffRequest: AbortController | undefined, diffFailed = false;
       const active = () => visible && !disposed && !context.signal.aborted && document.visibilityState === "visible";
+      const diffGroups = () => groups.filter((group): group is typeof group & { key: DiffSection } => group.key !== "untracked");
+      const statusFingerprint = () => diffGroups().map(group => group.fingerprint).join("\n");
+      const openRows = () => diffGroups().flatMap(group => [...group.rows.values()].filter(row => row.details.open && row.row.isConnected).map(row => [group.key, row] as const));
+      const note = (body: HTMLElement, value: string) => { body.replaceChildren(element("p", "diff-note", value)); };
+      const renderDiff = (section: DiffSection, row: DiffRow) => {
+        if (!row.details.open || diff && row.rendered === diff) return;
+        row.rendered = diff;
+        if (!diff) return note(row.body, diffRequest ? "Loading diff…" : diffFailed ? "Diff unavailable." : "");
+        if (diff.state === "not-repository") return note(row.body, "Not a Git repository.");
+        const sections = row.paths.flatMap(path => diff?.state === "ready" ? diff[section].get(path) ?? [] : []);
+        if (!sections.length) return note(row.body, diff.truncated ? "Not shown: the host truncated the diff." : "No diff for this file. It may have changed since the last check.");
+        // diff2html escapes paths and diff lines; its output is the only markup inserted as HTML.
+        row.body.innerHTML = html(sections.join(""), DIFF_OPTIONS);
+        // Long lines scroll inside each file; keyboard users need to reach that scroller.
+        for (const scroller of row.body.querySelectorAll<HTMLElement>(".d2h-file-diff")) {
+          scroller.tabIndex = 0; scroller.setAttribute("role", "region"); scroller.setAttribute("aria-label", `Diff of ${row.summary.getAttribute("aria-label")}`);
+        }
+      };
+      const updateDiffs = () => {
+        const open = openRows();
+        for (const [section, row] of open) renderDiff(section, row);
+        if (!open.length && diffBar.contains(document.activeElement)) refresh.focus({ preventScroll: true });
+        diffBar.hidden = !open.length;
+        text(diffMessage, diffRequest ? diff ? "Updating diffs; showing the previous diff." : "Loading diff…"
+          : diffFailed ? diff ? "Could not refresh diffs; showing the previous diff." : "Diff unavailable. Try Refresh diffs."
+          : diff?.state === "ready" && diff.truncated ? "Diff truncated by the host. Some changes are not shown." : "");
+        diffBar.dataset.stale = String(Boolean(diff && (diffRequest || diffFailed)));
+      };
+      const readDiff = async (force = false) => {
+        if (!diffs || !active() || diffRequest || !openRows().length || !force && diff && diffFingerprint === statusFingerprint()) return updateDiffs();
+        const current = new AbortController(), fingerprint = statusFingerprint();
+        diffRequest = current; refreshDiffs.setAttribute("aria-busy", "true"); updateDiffs();
+        try {
+          const value = await context.project.gitDiff!(current.signal);
+          if (diffRequest !== current) return;
+          diff = value.state === "ready" ? { state: "ready", staged: indexDiff(value.staged), unstaged: indexDiff(value.unstaged), truncated: value.truncated } : value;
+          diffFingerprint = fingerprint; diffFailed = false;
+        } catch {
+          if (diffRequest === current) diffFailed = true;
+        } finally {
+          if (diffRequest === current) { diffRequest = undefined; refreshDiffs.removeAttribute("aria-busy"); updateDiffs(); }
+        }
+      };
       const render = (status: ProjectGitStatus) => {
         for (const group of groups) {
+          const rowFor = (change: GitFileChange): HTMLElement => {
+            if (!diffs || group.key === "untracked") return fileRow(change);
+            // Rows are keyed by path so an open diff survives polls; changed row content keeps the disclosure state.
+            const previous = group.rows.get(change.path), key = JSON.stringify(change);
+            if (previous?.key === key) return previous.row;
+            const next = diffRow(change); next.details.open = previous?.details.open ?? false; group.rows.set(change.path, next);
+            return next.row;
+          };
           const changes = status.state === "ready" ? status[group.key] : [];
           const fingerprint = JSON.stringify(changes);
           if (!changes.length && group.section.contains(document.activeElement)) refresh.focus({ preventScroll: true });
@@ -204,11 +345,14 @@ export default function register(host: ExtensionRegistrationHost): void {
           if (fingerprint === group.fingerprint) continue;
           group.fingerprint = fingerprint; text(group.badge, String(changes.length));
           const focused = document.activeElement;
-          const focusedPath = [...group.directories].find(([, directory]) => directory.heading === focused)?.[0];
+          const focusedRow = [...group.rows].find(([, row]) => row.summary === focused);
+          const focusedPath = focusedRow ? focusedRow[0].slice(0, Math.max(focusedRow[0].lastIndexOf("/"), 0)) : [...group.directories].find(([, directory]) => directory.heading === focused)?.[0];
           snapshot(group);
-          renderPaths(group.list, changes, group.directories, group.collapsed);
+          renderPaths(group.list, changes, group.directories, group.collapsed, rowFor);
+          for (const [path, row] of group.rows) if (!row.row.isConnected) group.rows.delete(path);
           if (focusedPath !== undefined && changes.length) {
-            let path = focusedPath, fallback = group.heading;
+            const survivor = focusedRow && group.rows.get(focusedRow[0]);
+            let path = survivor ? "" : focusedPath, fallback = survivor?.summary ?? group.heading;
             while (path) {
               const directory = group.directories.get(path);
               if (directory) { fallback = directory.heading; break; }
@@ -234,8 +378,12 @@ export default function register(host: ExtensionRegistrationHost): void {
         text(updated, now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
         updated.title = `Last successful check: ${now.toLocaleString()}`;
         root.dataset.stale = "false"; hasResult = true;
+        void readDiff();
       };
-      const stop = () => { clearTimeout(timer); timer = undefined; request?.abort(); request = undefined; refresh.removeAttribute("aria-busy"); };
+      const stop = () => {
+        clearTimeout(timer); timer = undefined; request?.abort(); request = undefined; refresh.removeAttribute("aria-busy");
+        diffRequest?.abort(); diffRequest = undefined; refreshDiffs.removeAttribute("aria-busy");
+      };
       const read = async () => {
         if (!active() || request) return;
         clearTimeout(timer); timer = undefined;
@@ -272,6 +420,8 @@ export default function register(host: ExtensionRegistrationHost): void {
         context.signal.removeEventListener("abort", dispose); root.remove();
       };
       files.addEventListener("toggle", persist, true);
+      if (diffs) files.addEventListener("toggle", event => { if ((event.target as Element).matches(".file-diff")) void readDiff(); }, true);
+      refreshDiffs.addEventListener("click", () => { void readDiff(true); });
       refresh.addEventListener("click", onFocus);
       window.addEventListener("focus", onFocus);
       document.addEventListener("visibilitychange", onVisibility);
