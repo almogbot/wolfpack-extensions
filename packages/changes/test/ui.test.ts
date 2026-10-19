@@ -8,7 +8,7 @@ const root = join(import.meta.dirname, "..");
 
 /** Generic test-only canvas: it supplies only neutral page sizing and host theme tokens,
  * not Wolfpack layout/framework CSS. The extension owns all tested widget styles. */
-async function component({ launch = () => chromium.launch({ headless: true, ...(process.env.WOLFPACK_WIDGET_BRAVE ? { executablePath: process.env.WOLFPACK_WIDGET_BRAVE } : {}) }) }: { launch?: () => Promise<Browser> } = {}) {
+async function component({ launch = () => chromium.launch({ headless: true, ...(process.env.WOLFPACK_WIDGET_BRAVE ? { executablePath: process.env.WOLFPACK_WIDGET_BRAVE } : {}) }), diff = false }: { launch?: () => Promise<Browser>; diff?: boolean } = {}) {
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
     return new URL(request.url).pathname === "/ui.js"
       ? new Response(Bun.file(join(root, "dist", "ui.js")), { headers: { "content-type": "text/javascript" } })
@@ -17,11 +17,15 @@ async function component({ launch = () => chromium.launch({ headless: true, ...(
   let browser: Browser | undefined;
   try {
     browser = await launch(); const page = await (await browser.newContext()).newPage(); await page.goto(server.url.toString());
-    await page.evaluate(async () => {
+    await page.evaluate(async withDiff => {
       const asset = "/ui.js"; const module = await import(asset); let contribution: any; let abort = new AbortController();
       module.default({ registerContextView(value: any) { contribution = value; }, registerTerminalLayout() {} });
       const git = { calls: 0, value: { state: "not-repository" } as any, fail: false, pending: false, signals: [] as AbortSignal[], releases: [] as Array<(value: any) => void> };
       (globalThis as any).__git = git;
+      const diff = { calls: 0, value: { state: "not-repository" } as any, fail: false, pending: false, signals: [] as AbortSignal[], releases: [] as Array<(value: any) => void> };
+      (globalThis as any).__diff = diff;
+      // Hosts without project.gitDiff omit the member entirely.
+      const gitDiff = async (signal: AbortSignal) => { diff.calls++; diff.signals.push(signal); if (diff.fail) throw Error("unavailable"); return diff.pending ? new Promise(resolve => diff.releases.push(resolve)) : diff.value; };
       // Shared across remounts, like host localStorage for one installation/session scope.
       const store = { values: new Map<string, string>(), failGet: false, failSet: false, gets: 0, sets: 0 };
       (globalThis as any).__storage = store;
@@ -30,10 +34,10 @@ async function component({ launch = () => chromium.launch({ headless: true, ...(
         set: (key: string, value: string) => { store.sets++; if (store.failSet) throw Error("storage quota exceeded"); store.values.set(key, value); },
         remove: (key: string) => { store.values.delete(key); },
       };
-      const mount = () => contribution.mount(document.querySelector("main"), { signal: abort.signal, scope: { installationId: "installation", sessionId: "11111111-1111-4111-8111-111111111111" }, selection: { selectedSessionId: null }, theme: {}, storage, documents: { read: async () => null, subscribe() { return () => {}; } }, project: { gitStatus: async (signal: AbortSignal) => { git.calls++; git.signals.push(signal); if (git.fail) throw Error("unavailable"); return git.pending ? new Promise(resolve => git.releases.push(resolve)) : git.value; } } });
+      const mount = () => contribution.mount(document.querySelector("main"), { signal: abort.signal, scope: { installationId: "installation", sessionId: "11111111-1111-4111-8111-111111111111" }, selection: { selectedSessionId: null }, theme: {}, storage, documents: { read: async () => null, subscribe() { return () => {}; } }, project: { gitStatus: async (signal: AbortSignal) => { git.calls++; git.signals.push(signal); if (git.fail) throw Error("unavailable"); return git.pending ? new Promise(resolve => git.releases.push(resolve)) : git.value; }, ...(withDiff ? { gitDiff } : {}) } });
       let controller = mount();
       (globalThis as any).__sample = { get abort() { return abort; }, get controller() { return controller; }, remount() { abort.abort(); abort = new AbortController(); controller = mount(); controller.setVisible(true); } };
-    });
+    }, diff);
     return { page, async close() { await browser!.close(); server.stop(true); } };
   } catch (error) { await browser?.close(); server.stop(true); throw error; }
 }
@@ -42,6 +46,16 @@ async function component({ launch = () => chromium.launch({ headless: true, ...(
 async function flushTasks(page: Page) {
   for (let round = 0; round < 2; round++) await page.evaluate(() => new Promise(resolve => { const channel = new MessageChannel(); channel.port1.onmessage = () => resolve(null); channel.port2.postMessage(0); }));
 }
+/** One file's unified diff in Git's output form; `quoted` is Git's C-quoted spelling of the path (with its tab suffix when the path has spaces). */
+function fileDiff(path: string, removed: string[], added: string[], quoted?: string): string {
+  const side = (prefix: string) => quoted ? `"${prefix}${quoted}"` : `${prefix}${path}`, tab = quoted?.includes(" ") ? "\t" : "";
+  return [`diff --git ${side("a/")} ${side("b/")}`, ...removed.length ? [] : ["new file mode 100644"], ...added.length ? [] : ["deleted file mode 100644"], "index 1111111..2222222",
+    `--- ${removed.length ? side("a/") + tab : "/dev/null"}`, `+++ ${added.length ? side("b/") + tab : "/dev/null"}`,
+    `@@ -${removed.length ? 1 : 0},${removed.length} +${added.length ? 1 : 0},${added.length} @@`, ...removed.map(line => `-${line}`), ...added.map(line => `+${line}`)].join("\n") + "\n";
+}
+const cssString = (value: string) => value.replace(/["\\]/g, "\\$&").replace(/\n/g, "\\a ");
+const fileDisclosure = (page: Page, group: string, path: string) => page.locator(`[data-group="${group}"] details.file-diff`).filter({ has: page.locator(`.path[title="${cssString(path)}"]`) });
+const diffLines = (page: Page, group: string, path: string) => fileDisclosure(page, group, path).locator(".d2h-code-line-ctn").allTextContents();
 function pageErrors(page: Page): string[] {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -350,6 +364,183 @@ test("Changes keeps default disclosures working when disclosure storage throws o
     expect(await open('[data-group="staged"]')).toBe(false);
     expect(await open('[data-group="staged"] details[data-directory="tests"]')).toBe(true);
     expect(await open('[data-group="staged"] details[data-directory="tests/unit"]')).toBe(false);
+    expect(errors).toEqual([]);
+  } finally { await fixture.close(); }
+}, 20_000);
+
+test("Changes without project.gitDiff keeps plain file rows and no diff controls", async () => {
+  const fixture = await component();
+  try {
+    const { page } = fixture; await page.clock.install();
+    await page.evaluate(() => {
+      (globalThis as any).__git.value = { state: "ready", branch: "plain", detached: false, truncated: false,
+        staged: [{ path: "src/a.ts", status: "modified" }], unstaged: [{ path: "b.ts", status: "modified" }], untracked: [] };
+      (globalThis as any).__sample.controller.setVisible(true);
+    });
+    await page.waitForFunction(() => document.querySelector(".wolfpack-changes .branch")?.textContent === "plain");
+    expect(await page.locator(".wolfpack-changes details.file-diff").count()).toBe(0);
+    expect(await page.locator(".wolfpack-changes .diff-bar").count()).toBe(0);
+    expect(await page.locator('li[aria-label="Modified: src/a.ts"]').count()).toBe(1);
+    expect(await page.evaluate(() => (globalThis as any).__diff.calls)).toBe(0);
+  } finally { await fixture.close(); }
+}, 20_000);
+
+test("Changes renders per-file staged and unstaged diffs from one lazy gitDiff read", async () => {
+  const fixture = await component({ diff: true });
+  try {
+    const { page } = fixture; await page.clock.install();
+    const errors = pageErrors(page);
+    const staged = fileDiff("src/a.ts", ["base"], ["staged after"]) + fileDiff("added.txt", [], ["hello"]) + fileDiff("gone.txt", ["bye"], [])
+      + "diff --git a/bin.dat b/bin.dat\nindex 1111111..2222222 100644\nBinary files a/bin.dat and b/bin.dat differ\n";
+    const unstaged = fileDiff("src/a.ts", ["staged after"], ["unstaged after"]) + fileDiff("new\nline.txt", ["n"], ["n2"], "new\\nline.txt")
+      + fileDiff("spa ce é.txt", ["q"], ["q2"], "spa ce \\303\\251.txt");
+    await page.evaluate(([staged, unstaged]) => {
+      (globalThis as any).__diff.value = { state: "ready", staged, unstaged, truncated: false };
+      (globalThis as any).__git.value = { state: "ready", branch: "diffs", detached: false, truncated: false,
+        staged: [{ path: "src/a.ts", status: "modified" }, { path: "added.txt", status: "added" }, { path: "gone.txt", status: "deleted" }, { path: "bin.dat", status: "modified" }, { path: "late.ts", status: "added" }],
+        unstaged: [{ path: "src/a.ts", status: "modified" }, { path: "new\nline.txt", status: "modified" }, { path: "spa ce é.txt", status: "modified" }],
+        untracked: [{ path: "loose.txt", status: "untracked" }] };
+      (globalThis as any).__sample.controller.setVisible(true);
+    }, [staged, unstaged]);
+    await page.waitForFunction(() => document.querySelector(".wolfpack-changes .branch")?.textContent === "diffs");
+    const calls = () => page.evaluate(() => (globalThis as any).__diff.calls as number);
+    expect(await calls()).toBe(0);
+    expect(await page.locator('[data-group="untracked"] details.file-diff').count()).toBe(0);
+    expect(await page.getByRole("button", { name: "Refresh diffs" }).isVisible()).toBe(false);
+    await fileDisclosure(page, "staged", "src/a.ts").locator(":scope > summary").click();
+    await page.waitForFunction(() => document.querySelector('[data-group="staged"] .d2h-code-line-ctn'));
+    expect(await diffLines(page, "staged", "src/a.ts")).toEqual(["base", "staged after"]);
+    expect(await calls()).toBe(1);
+    expect(await page.getByRole("button", { name: "Refresh diffs" }).isVisible()).toBe(true);
+    const unstagedSummary = fileDisclosure(page, "unstaged", "src/a.ts").locator(":scope > summary");
+    await unstagedSummary.focus(); await unstagedSummary.press("Enter");
+    await page.waitForFunction(() => document.querySelector('[data-group="unstaged"] .d2h-code-line-ctn'));
+    expect(await diffLines(page, "unstaged", "src/a.ts")).toEqual(["staged after", "unstaged after"]);
+    for (const [group, path] of [["unstaged", "new\nline.txt"], ["unstaged", "spa ce é.txt"], ["staged", "added.txt"], ["staged", "gone.txt"], ["staged", "bin.dat"], ["staged", "late.ts"]] as const) {
+      await fileDisclosure(page, group, path).locator(":scope > summary").click();
+    }
+    await flushTasks(page);
+    expect(await calls()).toBe(1);
+    expect(await diffLines(page, "unstaged", "new\nline.txt")).toEqual(["n", "n2"]);
+    expect(await diffLines(page, "unstaged", "spa ce é.txt")).toEqual(["q", "q2"]);
+    expect(await diffLines(page, "staged", "added.txt")).toEqual(["hello"]);
+    expect(await diffLines(page, "staged", "gone.txt")).toEqual(["bye"]);
+    expect(await fileDisclosure(page, "staged", "bin.dat").locator(".d2h-code-line").textContent()).toContain("Binary file");
+    expect(await fileDisclosure(page, "staged", "late.ts").locator(".diff-note").textContent()).toBe("No diff for this file. It may have changed since the last check.");
+    expect(await page.evaluate(() => (globalThis as any).__diff.signals[0].aborted)).toBe(false);
+    expect(errors).toEqual([]);
+  } finally { await fixture.close(); }
+}, 20_000);
+
+test("Changes refetches open diffs on status changes or Refresh diffs, keeps the previous diff while stale and aborts when hidden", async () => {
+  const fixture = await component({ diff: true });
+  try {
+    const { page } = fixture; await page.clock.install();
+    const errors = pageErrors(page);
+    const version = (text: string) => ({ state: "ready", staged: fileDiff("src/a.ts", ["base"], [text]), unstaged: "", truncated: false });
+    await page.evaluate(value => {
+      (globalThis as any).__diff.value = value;
+      (globalThis as any).__git.value = { state: "ready", branch: "stale", detached: false, truncated: false, staged: [{ path: "src/a.ts", status: "modified" }], unstaged: [], untracked: [] };
+      (globalThis as any).__sample.controller.setVisible(true);
+    }, version("first"));
+    await page.waitForFunction(() => document.querySelector(".wolfpack-changes .branch")?.textContent === "stale");
+    const summary = fileDisclosure(page, "staged", "src/a.ts").locator(":scope > summary");
+    const message = page.locator(".wolfpack-changes .diff-bar [role=status]"), refreshDiffs = page.getByRole("button", { name: "Refresh diffs" });
+    const calls = () => page.evaluate(() => (globalThis as any).__diff.calls as number);
+    await summary.focus(); await summary.press("Enter");
+    await page.waitForFunction(() => document.querySelector(".d2h-code-line-ctn"));
+    expect(await diffLines(page, "staged", "src/a.ts")).toEqual(["base", "first"]);
+    expect(await message.textContent()).toBe("");
+    await summary.evaluate(node => { (globalThis as any).__diffSummary = node; });
+    // A changed status fingerprint refetches while the previous diff stays visible.
+    await page.evaluate(() => { (globalThis as any).__diff.pending = true; (globalThis as any).__git.value.unstaged = [{ path: "b.ts", status: "modified" }]; });
+    await page.clock.fastForward(5000);
+    await page.waitForFunction(() => (globalThis as any).__diff.calls === 2);
+    expect(await message.textContent()).toBe("Updating diffs; showing the previous diff.");
+    expect(await diffLines(page, "staged", "src/a.ts")).toEqual(["base", "first"]);
+    expect(await summary.evaluate(node => node === (globalThis as any).__diffSummary && node === document.activeElement)).toBe(true);
+    expect(await fileDisclosure(page, "staged", "src/a.ts").evaluate((node: HTMLDetailsElement) => node.open)).toBe(true);
+    await page.evaluate(value => { const diff = (globalThis as any).__diff; diff.pending = false; diff.releases[0](value); }, version("second"));
+    await page.waitForFunction(() => [...document.querySelectorAll(".d2h-code-line-ctn")].some(node => node.textContent === "second"));
+    expect(await message.textContent()).toBe("");
+    // Unchanged status does not refetch; Refresh diffs does.
+    await page.clock.fastForward(5000); await flushTasks(page);
+    expect(await calls()).toBe(2);
+    await page.evaluate(value => { (globalThis as any).__diff.value = { ...value, truncated: true }; }, version("third"));
+    await refreshDiffs.click();
+    await page.waitForFunction(() => [...document.querySelectorAll(".d2h-code-line-ctn")].some(node => node.textContent === "third"));
+    expect(await calls()).toBe(3);
+    expect(await message.textContent()).toBe("Diff truncated by the host. Some changes are not shown.");
+    await fileDisclosure(page, "unstaged", "b.ts").locator(":scope > summary").click();
+    await page.waitForFunction(() => document.querySelector('[data-group="unstaged"] .diff-note'));
+    expect(await fileDisclosure(page, "unstaged", "b.ts").locator(".diff-note").textContent()).toBe("Not shown: the host truncated the diff.");
+    await page.evaluate(() => { (globalThis as any).__diff.fail = true; });
+    await refreshDiffs.click();
+    await page.waitForFunction(() => document.querySelector(".wolfpack-changes .diff-bar [role=status]")?.textContent?.startsWith("Could not"));
+    expect(await message.textContent()).toBe("Could not refresh diffs; showing the previous diff.");
+    expect(await diffLines(page, "staged", "src/a.ts")).toEqual(["base", "third"]);
+    await summary.press("Enter");
+    expect(await fileDisclosure(page, "staged", "src/a.ts").evaluate((node: HTMLDetailsElement) => node.open)).toBe(false);
+    await page.evaluate(() => { const diff = (globalThis as any).__diff; diff.fail = false; diff.pending = true; });
+    await refreshDiffs.click();
+    await page.waitForFunction(() => (globalThis as any).__diff.calls === 5);
+    await page.evaluate(() => (globalThis as any).__sample.controller.setVisible(false));
+    expect(await page.evaluate(() => (globalThis as any).__diff.signals.at(-1).aborted)).toBe(true);
+    // Closing every diff hides the shared diff controls.
+    await page.evaluate(() => { (globalThis as any).__diff.pending = false; (globalThis as any).__sample.controller.setVisible(true); });
+    await fileDisclosure(page, "unstaged", "b.ts").locator(":scope > summary").click();
+    await flushTasks(page);
+    expect(await refreshDiffs.isVisible()).toBe(false);
+    // A first read that fails leaves rows usable and says so.
+    await page.evaluate(() => { (globalThis as any).__diff.fail = true; (globalThis as any).__sample.remount(); });
+    await page.waitForFunction(() => document.querySelector(".wolfpack-changes .branch")?.textContent === "stale");
+    await fileDisclosure(page, "staged", "src/a.ts").locator(":scope > summary").click();
+    await page.waitForFunction(() => document.querySelector(".wolfpack-changes .diff-bar [role=status]")?.textContent?.startsWith("Diff unavailable"));
+    expect(await message.textContent()).toBe("Diff unavailable. Try Refresh diffs.");
+    expect(await fileDisclosure(page, "staged", "src/a.ts").locator(".diff-note").textContent()).toBe("Diff unavailable.");
+    expect(errors).toEqual([]);
+  } finally { await fixture.close(); }
+}, 20_000);
+
+test("Changes renders hostile diff content inert, scopes diff styles and keeps long diffs inside the widget", async () => {
+  const fixture = await component({ diff: true });
+  try {
+    const { page } = fixture; await page.clock.install();
+    const errors = pageErrors(page);
+    const hostile = '<img src=x onerror="window.__xss=1">.ts';
+    const staged = fileDiff(hostile, ["<script>window.__xss=2</script>"], ['<a href="javascript:window.__xss=3">x</a><iframe src="javascript:window.__xss=4"></iframe><img src=x onerror="window.__xss=5">']);
+    const unstaged = fileDiff("src/long.ts", ["short"], [`const value = "${"x".repeat(2000)}";`]);
+    await page.evaluate(([staged, unstaged, hostile]) => {
+      document.body.insertAdjacentHTML("beforeend", '<div class="line-num1 d2h-probe"></div>');
+      (globalThis as any).__diff.value = { state: "ready", staged, unstaged, truncated: false };
+      (globalThis as any).__git.value = { state: "ready", branch: "hostile", detached: false, truncated: false,
+        staged: [{ path: hostile, status: "modified" }], unstaged: [{ path: "src/long.ts", status: "modified" }], untracked: [] };
+      (globalThis as any).__sample.controller.setVisible(true);
+    }, [staged, unstaged, hostile]);
+    await page.waitForFunction(() => document.querySelector(".wolfpack-changes .branch")?.textContent === "hostile");
+    await fileDisclosure(page, "staged", hostile).locator(":scope > summary").click();
+    await fileDisclosure(page, "unstaged", "src/long.ts").locator(":scope > summary").click();
+    await page.waitForFunction(() => document.querySelectorAll(".wolfpack-changes .d2h-file-wrapper").length === 2);
+    expect(await diffLines(page, "staged", hostile)).toEqual(["<script>window.__xss=2</script>", '<a href="javascript:window.__xss=3">x</a><iframe src="javascript:window.__xss=4"></iframe><img src=x onerror="window.__xss=5">']);
+    expect(await page.locator(".wolfpack-changes :is(script, img, iframe, a, object, embed)").count()).toBe(0);
+    expect(await page.evaluate(() => (globalThis as any).__xss)).toBeUndefined();
+    // The diff stylesheet must not define page-wide variables or style host elements that share its class names.
+    expect(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--d2h-bg-color"))).toBe("");
+    expect(await page.locator(".d2h-probe").evaluate(node => getComputedStyle(node).float)).toBe("none");
+    for (const width of [320, 900]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.locator(".wolfpack-changes").evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      expect(await page.locator(".wolfpack-changes .files").evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+      const box = await page.getByRole("button", { name: "Refresh diffs" }).boundingBox();
+      expect(box!.height).toBeGreaterThanOrEqual(width === 320 ? 44 : 32);
+      const accessibility = await new AxeBuilder({ page }).include(".wolfpack-changes").withTags(["wcag2a", "wcag2aa"]).analyze();
+      expect(accessibility.violations.filter(v => ["serious", "critical"].includes(v.impact ?? ""))).toEqual([]);
+      if (process.env.WOLFPACK_WIDGET_ARTIFACTS) {
+        mkdirSync(process.env.WOLFPACK_WIDGET_ARTIFACTS, { recursive: true });
+        await page.screenshot({ path: join(process.env.WOLFPACK_WIDGET_ARTIFACTS, `changes-diff-${width}.png`), fullPage: true, animations: "disabled" });
+      }
+    }
     expect(errors).toEqual([]);
   } finally { await fixture.close(); }
 }, 20_000);
