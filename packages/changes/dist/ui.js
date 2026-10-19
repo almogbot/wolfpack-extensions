@@ -50,6 +50,38 @@ function fileRow(change) {
   row.append(path, kind);
   return row;
 }
+var GROUP_KEYS = ["staged", "unstaged", "untracked"];
+var isGroupKey = (value) => GROUP_KEYS.some((key) => key === value);
+var DISCLOSURE_KEY = "disclosure";
+var MAX_COLLAPSED = 256;
+var MAX_PATH_LENGTH = 4096;
+function parseDisclosure(raw) {
+  const state = { closed: new Set, collapsed: { staged: new Set, unstaged: new Set, untracked: new Set } };
+  let value;
+  try {
+    value = raw === null ? null : JSON.parse(raw);
+  } catch {
+    return state;
+  }
+  if (!value || typeof value !== "object")
+    return state;
+  const { closed, collapsed } = value;
+  if (Array.isArray(closed)) {
+    for (const key of closed)
+      if (isGroupKey(key))
+        state.closed.add(key);
+  }
+  if (collapsed && typeof collapsed === "object")
+    for (const key of GROUP_KEYS) {
+      const paths = collapsed[key];
+      if (Array.isArray(paths))
+        for (const path of paths.slice(-MAX_COLLAPSED)) {
+          if (typeof path === "string" && path && path.length <= MAX_PATH_LENGTH)
+            state.collapsed[key].add(path);
+        }
+    }
+  return state;
+}
 function renderPaths(list, changes, directories, collapsed) {
   const available = new Set;
   const children = new Map;
@@ -180,17 +212,37 @@ function register(host) {
       };
       showMessage("Checking Git…", "loading");
       const files = element("div", "files");
-      const groups = ["staged", "unstaged", "untracked"].map((key) => {
+      const restored = parseDisclosure((() => {
+        try {
+          return context.storage.get(DISCLOSURE_KEY);
+        } catch {
+          return null;
+        }
+      })());
+      const groups = GROUP_KEYS.map((key) => {
         const title = key[0].toUpperCase() + key.slice(1), section = element("details"), heading = element("summary"), badge = element("span", "group-count", "0"), list = element("ul");
         section.dataset.group = key;
-        section.open = true;
+        section.open = !restored.closed.has(key);
         section.hidden = true;
         list.setAttribute("aria-label", `${title} files`);
         heading.append(element("span", "", title), badge);
         section.append(heading, list);
         files.append(section);
-        return { key, section, heading, badge, list, fingerprint: "", directories: new Map, collapsed: new Set };
+        return { key, section, heading, badge, list, fingerprint: "", directories: new Map, collapsed: restored.collapsed[key] };
       });
+      const snapshot = (group) => {
+        for (const [path, directory] of group.directories) {
+          if (directory.section.open)
+            group.collapsed.delete(path);
+          else
+            group.collapsed.add(path);
+        }
+      };
+      const serialize = () => JSON.stringify({
+        closed: groups.filter((group) => !group.section.open).map((group) => group.key),
+        collapsed: Object.fromEntries(groups.filter((group) => group.collapsed.size).map((group) => [group.key, [...group.collapsed].slice(-MAX_COLLAPSED)]))
+      });
+      let saved = serialize();
       const footer = element("footer"), automatic = element("span", "auto-refresh", "Auto-refresh · 5s"), updated = element("time", "updated", "Not checked yet");
       automatic.title = "Updates every five seconds while visible, and when you return to this window.";
       footer.append(automatic, updated);
@@ -212,12 +264,7 @@ function register(host) {
           text(group.badge, String(changes.length));
           const focused = document.activeElement;
           const focusedPath = [...group.directories].find(([, directory]) => directory.heading === focused)?.[0];
-          for (const [path, directory] of group.directories) {
-            if (directory.section.open)
-              group.collapsed.delete(path);
-            else
-              group.collapsed.add(path);
-          }
+          snapshot(group);
           renderPaths(group.list, changes, group.directories, group.collapsed);
           if (focusedPath !== undefined && changes.length) {
             let path = focusedPath, fallback = group.heading;
@@ -293,6 +340,19 @@ function register(host) {
           }
         }
       };
+      const persist = () => {
+        if (disposed)
+          return;
+        for (const group of groups)
+          snapshot(group);
+        const value = serialize();
+        if (value === saved)
+          return;
+        try {
+          context.storage.set(DISCLOSURE_KEY, value);
+          saved = value;
+        } catch {}
+      };
       const onFocus = () => {
         read();
       };
@@ -305,6 +365,7 @@ function register(host) {
       const dispose = () => {
         if (disposed)
           return;
+        persist();
         disposed = true;
         stop();
         document.removeEventListener("visibilitychange", onVisibility);
@@ -312,6 +373,7 @@ function register(host) {
         context.signal.removeEventListener("abort", dispose);
         root.remove();
       };
+      files.addEventListener("toggle", persist, true);
       refresh.addEventListener("click", onFocus);
       window.addEventListener("focus", onFocus);
       document.addEventListener("visibilitychange", onVisibility);
