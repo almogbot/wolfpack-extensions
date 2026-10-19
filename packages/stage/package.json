@@ -1,0 +1,44 @@
+{
+  "name": "wolfpack-extension-stage",
+  "version": "0.1.0",
+  "description": "WASM-4 games beside your Wolfpack terminal.",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "schemas",
+    "skills",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "wolfpack": {
+    "manifestVersion": 1,
+    "apiVersion": 1,
+    "id": "stage",
+    "ui": "dist/ui.js",
+    "skills": [
+      "skills/wolfpack-stage"
+    ],
+    "documents": [
+      {
+        "id": "cart",
+        "schemaVersion": 1,
+        "schema": "schemas/cart.schema.json"
+      }
+    ],
+    "blobs": {
+      "maxBlobBytes": 65536
+    }
+  },
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json",
+    "test": "bun test test",
+    "check:package": "bun run scripts/check-package.ts",
+    "check:package-negative": "bun run scripts/check-package-negative.ts",
+    "pack": "bun run scripts/pack.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
